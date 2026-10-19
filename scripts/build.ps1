@@ -27,7 +27,6 @@ try {
 
     Copy-Item 'target/release/QuotaPin.exe' $stage
     Copy-Item 'README.md' $stage
-    Copy-Item 'assets/logo.png' $stage
 
     $zip = Join-Path $dist "QuotaPin-$version-win64.zip"
     if (Test-Path $zip) { Remove-Item $zip -Force }

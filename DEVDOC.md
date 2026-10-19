@@ -126,7 +126,7 @@ quotapin/
 │  ├─ app.rc             # 图标 + VERSIONINFO
 │  ├─ icon.ico           # 16~256 多尺寸，128/256 用 PNG 压缩；由 make_logo.py 生成
 │  ├─ mark.bin           # 三档沙漏 × 16/20/24/32/48，预乘位图，编译期 include_bytes! 进 exe
-│  └─ logo.png           # 256px 透明标，发布包里给用户看的那份
+│  └─ logo.png           # 256px 透明标，README / 文档配图用（不进发布包）
 ├─ scripts/
 │  ├─ build.ps1          # 构建 + 测试 + 打 zip
 │  ├─ make_logo.py       # 源图（横向三格）→ mark.bin / icon.ico / logo.png（用 ffmpeg 解码 PNG）
@@ -500,7 +500,7 @@ cargo test --release                        # 14 tests
 pwsh -NoProfile -File scripts/build.ps1     # + dist/QuotaPin-0.1.0-win64.zip
 ```
 
-发布包内容：`QuotaPin.exe` + `README.md` + `logo.png`。没有安装器、没有 `install.cmd`——解压双击就是全部流程。
+发布包内容：`QuotaPin.exe` + `README.md`。没有安装器、没有 `install.cmd`——解压双击就是全部流程。logo 只在仓库里给文档用，不随包发。
 
 体积来源与手段：
 

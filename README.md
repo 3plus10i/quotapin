@@ -17,7 +17,7 @@
 
 | 来源 | 取用字段 | 界面呈现 |
 | --- | --- | --- |
-| `%USERPROFILE%\.codex\auth.json` | `tokens.access_token`、`tokens.account_id` | 请求头 `Authorization` / `ChatGPT-Account-Id` |
+| `%USERPROFILE%\.codex\auth.json`（若设了 `CODEX_HOME` 则取该目录） | `tokens.access_token`、`tokens.account_id` | 请求头 `Authorization` / `ChatGPT-Account-Id` |
 | `GET /backend-api/wham/usage` | `rate_limit.primary_window`（18000s） | 「5 小时」剩余百分比、进度条、重置时间 |
 | 同上 | `rate_limit.secondary_window`（604800s） | 「7 天」剩余百分比、进度条、重置时间 |
 | 同上 | `additional_rate_limits[]` | 若存在，追加为额外行（不额外造数据） |

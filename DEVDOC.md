@@ -18,7 +18,7 @@
 因此：
 
 - **只用 Win32**，不引入任何 UI 框架。依赖只有 `windows-sys`（FFI 声明，不含逻辑）和 `serde_json`（解析 JSON）。
-- **界面全部自绘**：一个 480 行的软件光栅器（`canvas.rs`）+ GDI 只负责文字栅格化。理由见 §7——GDI 的 `DrawText` 写不进 alpha 通道，而分层窗口必须要 alpha；与其叠三层折衷，不如自己控像素。
+- **界面全部自绘**：一个约 570 行的软件光栅器（`canvas.rs`）+ GDI 只负责文字栅格化。理由见 §7——GDI 的 `DrawText` 写不进 alpha 通道，而分层窗口必须要 alpha；与其叠三层折衷，不如自己控像素。
 - **图标运行时生成**：托盘图标＝两根额度条，颜色随余量走，所以必须能在运行时换色；用同一套 `draw_logo()` 既画托盘图标（`CreateIconIndirect`），也画 `assets/icon.ico`（`--icon` 命令），两者永不漂移。
 - **通知用托盘气泡**（`Shell_NotifyIcon` + `NIF_INFO`）：Win10/11 会把它渲染成标准 Toast 并进入通知中心，但不需要注册 AUMID、不需要快捷方式、不需要 WinRT——省掉一整套打包机制。
 
@@ -54,6 +54,22 @@ quotapin/
 └─ docs/images/          # README 用图（由 --render 产出）
 ```
 
+约 4000 行 Rust（含测试），其中 UI/窗口编排占一半：
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `app.rs` | 760 | 三个窗口过程、显隐与定位、菜单、安装 |
+| `ui.rs` | 657 | 主题、logo、面板/小窗绘制、命中测试 |
+| `canvas.rs` | 572 | 光栅器、字体、分层窗口 surface |
+| `api.rs` | 494 | 凭证、WinHTTP、JSON → Snapshot |
+| `poller.rs` | 469 | 轮询节奏、通知状态机 |
+| `sys.rs` | 419 | Win32 薄封装 |
+| `dev.rs` | 211 | `--render` / `--icon` |
+| `tray.rs` | 177 | 托盘图标/提示/菜单/气泡 |
+| `config.rs` | 118 | state.json |
+| `fmt.rs` | 113 | 百分比/时长/本地时间 |
+| `main.rs` | 61 | 入口、单实例、DPI、CLI |
+
 模块依赖是单向的，没有循环：
 
 ```
@@ -70,34 +86,39 @@ main ─→ app ─→ ui ─→ canvas
 ## 3. 数据流
 
 ```
-┌──────────────── poller thread (每 250ms 醒一次) ────────────────┐
-│                                                                 │
-│  到点了？                                                        │
-│    │                                                            │
-│    ├─ api::fetch()                                              │
-│    │    1. 读 %CODEX_HOME%\.codex\auth.json  → access_token     │
-│    │    2. WinHTTP GET /backend-api/wham/usage                  │
-│    │    3. WinHTTP GET /backend-api/wham/rate-limit-reset-credits
-│    │    4. serde_json → Snapshot{rows, credits, ok, error}       │
-│    │                                                            │
-│    ├─ process_notifications()  → Vec<Toast>   （见 §5）          │
-│    ├─ build_view()             → View         （UI 只吃 View）   │
-│    │                                                            │
-│    └─ lock(Shared) { view = ..; toasts += .. }                  │
-│       PostMessage(msg_hwnd, WM_APP+1)                            │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │  只有跨线程边界用 Mutex + 消息，
-                              │  窗口对象始终只在 UI 线程碰
-┌─────────────────────────────▼───────────────────────────────────┐
-│  UI thread (GetMessage 循环)                                     │
-│                                                                 │
-│  WM_APP+1  on_data()                                            │
-│     ├─ refresh_tray()    → 图标颜色 + 提示条                     │
-│     ├─ drain_toasts()    → Shell_NotifyIcon(NIF_INFO) × N        │
-│     └─ if 面板可见 → paint_popover(); if 小窗可见 → paint_mini() │
-│                                                                 │
-│  WM_APP+3  前台进程变化 → show_mini(fg || pinned)                │
-└─────────────────────────────────────────────────────────────────┘
+ p o l l e r   t h r e a d          每 250ms 心跳，到点才干活
+ ─────────────────────────────────────────────────────────────
+  0. 读凭证    %CODEX_HOME%\auth.json  → access_token / account_id
+                （未设置 CODEX_HOME 时 = %USERPROFILE%\.codex\auth.json）
+
+  1. 取数      WinHTTP GET  https://chatgpt.com/backend-api/wham/usage
+               WinHTTP GET  https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
+               请求头：Authorization / OpenAI-Beta: codex-1 / originator: Codex Desktop
+                       OAI-Product-Sku: CODEX / ChatGPT-Account-Id
+
+  2. 解析      serde_json::Value → Snapshot { rows, credits, credits_available, ok, error }
+
+  3. 判定      process_notifications(&snap, &mut cfg)  → Vec<Toast>     （见 §5）
+               process_credit_expiry(&snap, &mut cfg)  → Vec<Toast>
+
+  4. 投影      build_view(&snap, &cfg) → View   （UI 只吃 View，不认 Snapshot）
+
+  5. 交接      lock(Shared) { view = ..; toasts += .. }
+               PostMessage(msg_hwnd, WM_APP+1)
+
+ ───────────────────────── 跨线程只走 Mutex + PostMessage ─────────
+                     │
+                     ▼
+ u i   t h r e a d                  GetMessage 循环，从不碰网络
+ ─────────────────────────────────────────────────────────────
+  WM_APP+1   on_data()
+               ├─ refresh_tray()   图标双柱颜色 + 提示条文案
+               ├─ drain_toasts()   Shell_NotifyIcon(NIF_INFO) × N（最多 3 条）
+               └─ 面板可见 → paint_popover()；小窗可见 → paint_mini()
+                                 → Canvas → Surface → UpdateLayeredWindow
+
+  WM_APP+3   前台进程变化 → show_mini(fg || pinned)
+  WM_TIMER   30s          → 重画面板（刷新「x 分钟前」）+ 归还工作集
 ```
 
 三个关键约束：
@@ -248,38 +269,49 @@ poller 每拍检查，条件是三个都成立才触发：
 
 ### 7.1 面板（popover）
 
+宽 300dp，高度随行数自适应。
+
 ```
-┌ 300 ─────────────────────────────────────┐  ← 卡片；窗口四周另留 13dp 阴影边距
-│ ● Codex 余量                 更新 刚刚   │  头部 18dp：状态点 6.4dp + 标题 12dp/600
-│                                          │
-│ 5 小时                            80%    │  行高 50dp：标签 11.5dp/400 · 数值 21dp/600
-│ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░           │  进度条 5dp，圆角 2.5
-│ 重置 15:46 · 3 小时 52 分后              │  10.5dp/400
-│                                          │  行间距 10dp
-│ 7 天                              92%    │
-│ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░           │
-│ 重置 10-26 09:03 · 6 天 21 小时后        │
-│ ──────────────────────────────────────   │  1px 分隔线
-│ 重置机会 3 次        最近到期 10-23 02:13│  底部 30dp
-└──────────────────────────────────────────┘
+   ● Codex 余量                    更新 刚刚
+
+   5 小时                             80%
+   ██████████████████░░░░░░░░░░░░░
+   重置 15:46 · 3 小时 52 分后
+
+   7 天                               92%
+   ██████████████████████████░░░░░
+   重置 10-26 09:03 · 6 天 21 小时后
+
+   ────────────────────────────────────
+   重置机会 3 次      最近到期 10-23 02:13
 ```
 
-- 卡片圆角 12dp；左右内边距 14dp
-- 阴影：SDF 距离场做三次方衰减，`spread = 13dp`，亮色 `rgba(20,24,32,0.17)`，暗色 `rgba(0,0,0,0.35)`
-- 高度随行数自适应：`41 + n×50 + (n-1)×10 + 8 + 1 + 30 + 12`（两行 = 202dp，窗口 228dp）
+| 区块 | 度量 | 字体 / 颜色 |
+| --- | --- | --- |
+| 卡片 | 300dp 宽，圆角 12，左右内边距 14，窗口四周另留 13dp 阴影边距 | 底 `#FFFFFF` / `#1B1E23`，1px 描边 |
+| 头部 | y=13，高 18；左侧状态点直径 6.4dp | 标题 12dp/600；右侧状态 10.5dp/400 灰 |
+| 行 | 首行 y=41，行高 50，行间距 10 | 标签 11.5dp/400 灰；数值 21dp/600 |
+| 进度条 | y = 行首+26，高 5，圆角 2.5，宽 = 300 − 28 | 轨道 `#E8EAEE` / `#2E333A`，填充按 `severity()` |
+| 重置行 | y = 行首+35，高 15 | 10.5dp/400，`#9AA1AC` / `#6E7683` |
+| 分隔线 | 1px，距上下各 8dp | `#EDEFF2` / `#2B2F36` |
+| 底部 | 高 30 | 左「重置机会」10.5dp/400 + 次数 11.5dp/600；右侧 10.5dp/400 |
+| 阴影 | SDF 距离场三次方衰减，spread 13dp | 亮 `rgba(20,24,32,0.17)`，暗 `rgba(0,0,0,0.35)` |
+
+高度公式：`41 + n×50 + (n−1)×10 + 8 + 1 + 30 + 12`，两行 = 202dp（窗口 202 + 上下阴影 26 = 228dp）。
 
 ### 7.2 小窗（mini）
 
+卡片 158×50，圆角 11，底色 92–93% 不透明。
+
 ```
-┌ 158 ────────────────┐
-│ 5h  ▓▓▓▓▓▓▓░░  80%  │  行 1：y=13，标签 9dp/700，条 3dp，数值 10.5dp/600
-│ 7d  ▓▓▓▓▓▓▓▓▓░ 92%  │  行 2：y=30
-└─────────────────────┘  卡片 158×50，圆角 11，底色 92–93% 不透明
+   5h   ██████████░░░░░░░░          80%
+   7d   ██████████████████░░        92%
 ```
 
-- 进度条几何：`x ∈ [34, 112]`，数值右对齐到 `147`
-- 默认落点：工作区右下角内缩 14dp；拖动后写入 `state.json.mini_pos`
-- 单击/拖动阈值 3px：位移超过 3px 才算拖动，否则算点击
+- 行 y 坐标：13 / 30；进度条几何：`x ∈ [34, 112]`，高 3dp，圆角 1.5；数值右对齐到 `147`
+- 字体：标签 9dp/700 灰，数值 10.5dp/600（低于 40% 才染色）
+- 默认落点：工作区右下角内缩 14dp；拖动后位置写入 `state.json.mini_pos`，按所在显示器工作区夹取
+- 拖动判定：位移 > 3px 才算拖动，否则算点击
 
 ### 7.3 交互与信息承载
 

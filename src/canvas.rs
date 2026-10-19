@@ -4,13 +4,13 @@
 //! and pushed to a layered window with `UpdateLayeredWindow`. No GDI+ / Direct2D
 //! / WebView, which keeps the binary and the working set small.
 //!
-//! Text is the only thing GDI does: it is drawn white-on-black into a scratch
-//! DIB and turned into an alpha mask, which composites correctly onto the
-//! alpha channel (plain `DrawText` cannot write alpha).
+//! Text is the only thing GDI does, and it does it the ordinary way: the pixels
+//! under a run are copied into a scratch DIB, GDI paints antialiased glyphs onto
+//! them, and the result is blended back (see `Canvas::text`).
 
 use std::ffi::c_void;
 
-use windows_sys::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW,
     SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
@@ -361,6 +361,28 @@ impl Canvas {
 
     // ------------------------------------------------------------ text
 
+    /// One line of text, drawn the way every other Win32 app draws it.
+    ///
+    /// GDI is the ordinary rasteriser (the one Notepad uses), but it only does
+    /// its best work when it can write straight onto the destination pixels:
+    /// hinting snaps stems onto the pixel grid and ClearType adds per-channel
+    /// coverage. So the target region is copied into a scratch DIB, the glyphs
+    /// are composited onto it in final colour, and the pixels are blended back.
+    ///
+    /// Drawing white-on-black and reusing the brightness as an alpha mask — what
+    /// this used to do — flattens each pixel to a single coverage value, which
+    /// throws away the subpixel coverage and leaves exactly the ragged,
+    /// over-enlarged-bitmap look that comes from hinting alone.
+    ///
+    /// The backdrop under a text run must be opaque (both surfaces paint their
+    /// card first), which is what makes the blend back a plain lerp.
+    ///
+    /// ClearType is deliberately *not* used. Subpixel AA pays off when text sits
+    /// on a known, unscaled opaque background; here the surface is composited by
+    /// DWM at whatever scale the display asks for, and 1px CJK strokes at 11-12px
+    /// get coloured edges that read as noise rather than as sharpness. Grayscale
+    /// AA stays even at every size, which is what "smooth" looks like.
+    #[allow(clippy::too_many_arguments)]
     pub fn text(
         &mut self,
         font: &Font,
@@ -375,6 +397,15 @@ impl Canvas {
         if s.is_empty() || w <= 0 || h <= 0 || c.a == 0 {
             return;
         }
+        // clip to the canvas, but keep the logical box so alignment survives
+        let bx = x.max(0);
+        let by = y.max(0);
+        let bw = (x + w).min(self.w) - bx;
+        let bh = (y + h).min(self.h) - by;
+        if bw <= 0 || bh <= 0 {
+            return;
+        }
+
         let utf16: Vec<u16> = s.encode_utf16().collect();
         unsafe {
             let dc: HDC = CreateCompatibleDC(std::ptr::null_mut());
@@ -383,8 +414,8 @@ impl Canvas {
             }
             let mut bi: BITMAPINFO = std::mem::zeroed();
             bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-            bi.bmiHeader.biWidth = w;
-            bi.bmiHeader.biHeight = -h;
+            bi.bmiHeader.biWidth = bw;
+            bi.bmiHeader.biHeight = -bh;
             bi.bmiHeader.biPlanes = 1;
             bi.bmiHeader.biBitCount = 32;
             bi.bmiHeader.biCompression = BI_RGB;
@@ -401,16 +432,28 @@ impl Canvas {
                 DeleteDC(dc);
                 return;
             }
+            let px = bits as *mut u32;
+
+            // seed the scratch surface with what is already on screen, in
+            // straight alpha — GDI blends as if the DIB were opaque
+            for row in 0..bh {
+                for col in 0..bw {
+                    let p = self.px[((by + row) * self.w + bx + col) as usize];
+                    *px.add((row * bw + col) as usize) = straight(p);
+                }
+            }
+
             let old_bmp = SelectObject(dc, bmp as _);
             let old_font = SelectObject(dc, font.handle as _);
             SetBkMode(dc, TRANSPARENT as i32);
-            SetTextColor(dc, 0x00FF_FFFF as COLORREF);
+            // COLORREF is 0x00BBGGRR
+            SetTextColor(dc, ((c.b as u32) << 16) | ((c.g as u32) << 8) | c.r as u32);
 
             let mut rc = RECT {
-                left: 0,
-                top: 0,
-                right: w,
-                bottom: h,
+                left: x - bx,
+                top: y - by,
+                right: x - bx + w,
+                bottom: y - by + h,
             };
             let fmt = DT_SINGLELINE
                 | DT_VCENTER
@@ -422,19 +465,23 @@ impl Canvas {
                 };
             DrawTextW(dc, utf16.as_ptr(), utf16.len() as i32, &mut rc, fmt);
 
-            let src = bits as *const u32;
-            let total = (w * h) as usize;
-            for i in 0..total {
-                let v = *src.add(i);
-                // luminance of the white-on-black mask
-                let a = (v & 0xFF).max((v >> 8) & 0xFF).max((v >> 16) & 0xFF);
-                if a == 0 {
-                    continue;
+            // blend back per channel, so translucent text keeps its fringes
+            let t = c.a as f32 / 255.0;
+            for row in 0..bh {
+                for col in 0..bw {
+                    let o = *px.add((row * bw + col) as usize);
+                    if o == 0 {
+                        continue;
+                    }
+                    let di = ((by + row) * self.w + bx + col) as usize;
+                    let d = self.px[di];
+                    let mix = |sh: u32| {
+                        let dv = ((d >> sh) & 0xFF) as f32;
+                        let ov = ((o >> sh) & 0xFF) as f32;
+                        (dv + (ov - dv) * t).round().clamp(0.0, 255.0) as u32
+                    };
+                    self.px[di] = (d & 0xFF00_0000) | (mix(16) << 16) | (mix(8) << 8) | mix(0);
                 }
-                let px = (i as i32 % w) + x;
-                let py = (i as i32 / w) + y;
-                let cov = a as f32 / 255.0 * (c.a as f32 / 255.0);
-                self.blend(px, py, c, cov);
             }
 
             SelectObject(dc, old_font);
@@ -443,6 +490,20 @@ impl Canvas {
             DeleteDC(dc);
         }
     }
+}
+
+/// Premultiplied `0xAARRGGBB` to straight `0x00RRGGBB`.
+#[inline]
+fn straight(p: u32) -> u32 {
+    let a = (p >> 24) & 0xFF;
+    if a == 0 {
+        return 0;
+    }
+    if a == 255 {
+        return p & 0x00FF_FFFF;
+    }
+    let un = |v: u32| ((v * 255 + a / 2) / a).min(255);
+    (un((p >> 16) & 0xFF) << 16) | (un((p >> 8) & 0xFF) << 8) | un(p & 0xFF)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -455,7 +516,7 @@ pub enum Align {
 // ---------------------------------------------------------------- font
 
 pub struct Font {
-    pub handle: HFONT,
+    handle: HFONT,
 }
 
 unsafe impl Send for Font {}
@@ -466,14 +527,14 @@ impl Font {
         // ships Regular/Bold — a LOGFONT weight of 300 or 600 therefore snaps
         // back to Regular or Bold. The lighter and semibold cuts live in their
         // own families, so pick the face by name and keep lfWeight neutral.
-        let face = match weight {
+        let name = match weight {
             w if w <= 350 => "Segoe UI Light",
             w if w <= 450 => "Segoe UI",
             w if w < 650 => "Segoe UI Semibold",
             _ => "Segoe UI Bold",
         };
-        let face = crate::sys::wide(face);
-        let h = unsafe {
+        let face = crate::sys::wide(name);
+        let handle = unsafe {
             CreateFontW(
                 -px,
                 0,
@@ -486,12 +547,12 @@ impl Font {
                 1, // DEFAULT_CHARSET, lets GDI fall back to a CJK face
                 0,
                 0,
-                4, // ANTIALIASED_QUALITY: grayscale AA -> clean alpha mask
+                4, // ANTIALIASED_QUALITY: grayscale AA
                 0,
                 face.as_ptr(),
             )
         };
-        Self { handle: h }
+        Self { handle }
     }
 
     /// Pixel width of a string in this font.

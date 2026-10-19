@@ -17,7 +17,7 @@
 | CPU | 低 | **0.08%** | 一个 250 ms 心跳线程（睡醒多数拍什么都不做）+ 每 30 s 一次重绘 |
 | 部署 | 免安装 | **双击即用** | 单 exe，不写 Program Files，只留一份 `state.json`；开机自启靠 HKCU Run 键，菜单里开关 |
 
-**技术栈**：Rust 2021 + `windows-sys`（纯 FFI 声明）+ `serde_json`。没有任何 UI 框架、没有 WebView、没有 WinRT。界面是一个约 600 行的自绘软件光栅器（`canvas.rs`）画出来的，GDI 只负责把字栅格化成 alpha 蒙版。
+**技术栈**：Rust 2021 + `windows-sys`（纯 FFI 声明）+ `serde_json`。没有任何 UI 框架、没有 WebView、没有 WinRT。界面是一个约 600 行的自绘软件光栅器（`canvas.rs`）画出来的，GDI 只负责把字栅格化到临时 DIB 上。
 
 **数据链**（只读，两个 GET）
 
@@ -55,7 +55,7 @@ GET chatgpt.com/backend-api/wham/rate-limit-reset-credits → 每个机会的 id
 ```
 Canvas（Vec<u32>，预乘 BGRA）
   → 圆角矩形 / 圆环 / 阴影 / 进度条 / 三角形：全用 SDF 或 3×3 超采样求覆盖率
-  → 文字：GDI 白字黑底 DIB → 取 max(r,g,b) 当 alpha → 手工合成（DrawTextW 写不进 alpha 通道）
+  → 文字：目标像素拷进临时 DIB → GDI 用最终颜色就地压字 → 逐通道 lerp 回写（DrawTextW 写不进 alpha 通道）
 Surface（CreateDIBSection）→ UpdateLayeredWindow(ULW_ALPHA) → WS_EX_LAYERED 窗口
 ```
 
@@ -77,16 +77,16 @@ main ─→ app ─→ ui ─→ canvas
 | 文件 | 行 | 职责 |
 | --- | --- | --- |
 | `app.rs` | 726 | 三个窗口过程、显隐与定位、菜单、托盘状态刷新 |
-| `ui.rs` | 714 | 主题、沙漏标、面板 / 小窗绘制、命中测试、全部度量常量 |
-| `canvas.rs` | 626 | 软件光栅器、字体 alpha 蒙版、分层窗口 surface |
+| `ui.rs` | 751 | 主题、沙漏标、面板 / 小窗绘制、命中测试、全部度量常量 |
+| `canvas.rs` | 697 | 软件光栅器、文字就地绘制、分层窗口 surface |
 | `poller.rs` | 515 | 轮询节奏、通知状态机、`Snapshot → View` 投影 |
 | `api.rs` | 494 | 凭证读取、WinHTTP、JSON → `Snapshot` |
 | `sys.rs` | 419 | Win32 薄封装（窗口、进程、注册表、时间、DPR、内存） |
-| `dev.rs` | 213 | 设计期命令：`--render` / `--icon` |
+| `dev.rs` | 284 | 设计期命令：`--render` / `--icon` / `--svg` |
 | `tray.rs` | 177 | 托盘图标、提示条、右键菜单、气泡通知 |
 | `config.rs` | 147 | `state.json` 读写 + `Mark` 类型 |
 | `fmt.rs` | 113 | 百分比 / 时长 / 本地时间格式化 |
-| `main.rs` | 62 | 入口、单实例互斥、DPI、CLI |
+| `main.rs` | 72 | 入口、单实例互斥、DPI、CLI |
 
 **建议的阅读顺序**：`poller.rs`（数据怎么变成 View）→ `ui.rs` 的 `paint_popover`（View 怎么变成像素）→ `app.rs` 的 `run()` 与三个 `wndproc`（它们怎么被串起来）→ `canvas.rs`（像素怎么算的）→ `api.rs`（数据从哪来）。
 
@@ -108,7 +108,7 @@ main ─→ app ─→ ui ─→ canvas
 因此：
 
 - **只用 Win32**，不引入任何 UI 框架。依赖只有 `windows-sys`（FFI 声明，不含逻辑）和 `serde_json`（解析 JSON）。
-- **界面全部自绘**：一个约 600 行的软件光栅器（`canvas.rs`）+ GDI 只负责文字栅格化。理由见 §9——GDI 的 `DrawText` 写不进 alpha 通道，而分层窗口必须要 alpha；与其叠三层折衷，不如自己控像素。
+- **界面全部自绘**：一个约 700 行的软件光栅器（`canvas.rs`）+ GDI 只负责把字栅格化。理由见 §9——`DrawText` 写不进 alpha 通道，而分层窗口必须要 alpha；所以文字走「拷进临时 DIB → GDI 就地压字 → 混合回写」，其余形状自己控像素。
 - **图标运行时生成**：托盘图标＝一个分成两半的沙漏，颜色随两档余量走，所以必须能在运行时换色；用同一套 `draw_mark()` 既画托盘图标（`CreateIconIndirect`），也画 `assets/icon.ico`（`--icon` 命令），两者永不漂移。
 - **通知用托盘气泡**（`Shell_NotifyIcon` + `NIF_INFO`）：Win10/11 会把它渲染成标准 Toast 并进入通知中心，但不需要注册 AUMID、不需要快捷方式、不需要 WinRT——省掉一整套打包机制。
 - **不做安装模式**：单文件就是交付形态。开机自启只是 HKCU Run 下的一个键，右键菜单里勾一下就写，取消就删，比"安装"更透明也更好卸载。
@@ -373,13 +373,13 @@ poller 每拍检查，条件是三个都成立才触发：
 | 区块 | 度量 | 字体 / 颜色 |
 | --- | --- | --- |
 | 卡片 | 300dp 宽，圆角 12，左右内边距 14，窗口四周另留 13dp 阴影边距 | 底 `#FFFFFF` / `#1B1E23`，1px 描边 |
-| 头部 | y=13，高 18；左侧状态点直径 6.4dp | 标题 12dp/600；右侧状态 10.5dp/400 灰 |
-| 行 | 首行 y=41，行高 56，行间距 10 | 标签 11.5dp/400 灰；数值 21dp/**Light**（字号拉开层级，字重不加粗） |
+| 头部 | y=13，高 18；左侧状态点直径 6.4dp | 标题 12.5dp/600；右侧状态 11.5dp/400 灰 |
+| 行 | 首行 y=41，行高 56，行间距 10 | 标签 12dp/400 灰；重置说明 11.5dp/400；数值 21dp/**Light**（字号拉开层级，字重不加粗） |
 | 进度条 | y = 行首 + 25，宽 = 300 − 28，两端全圆角 | 轨道 `#E8EAEE` / `#2E333A`，填充按 `severity()` |
 | 进度条厚度 | 5 小时 = **4dp**，7 天 = **8dp**（`bar_height(limit_secs)`：`≥ 86400 s` 走粗条） | 一粗一细，两行不用读标签也能区分 |
 | 重置行 | y = 行首 + 39（`ROW_H − 17`，两行文字共用同一基线节奏） | 10.5dp/400，`#9AA1AC` / `#6E7683` |
 | 分隔线 | 1px，距上下各 8dp | `#EDEFF2` / `#2B2F36` |
-| 底部 | 高 30 | 左「重置机会」10.5dp/400 + 次数 11.5dp/600；右侧 10.5dp/400 |
+| 底部 | 高 30 | 左「重置机会」11.5dp/400 + 次数 12dp/600；右侧 11.5dp/400 |
 | 阴影 | SDF 距离场三次方衰减，spread 13dp | 亮 `rgba(20,24,32,0.17)`，暗 `rgba(0,0,0,0.35)` |
 
 高度公式：`41 + n×56 + (n−1)×10 + 8 + 1 + 30 + 12`，两行 = 214dp（窗口 214 + 上下阴影 26 = 240dp）。
@@ -397,7 +397,7 @@ poller 每拍检查，条件是三个都成立才触发：
 
 - 行 y 坐标：11 / 30；进度条以行内文字中线为轴居中，几何 `x ∈ [34, 112]`，两端全圆角；数值右对齐到 `147`
 - 厚度与面板同源：`mini_bar_height()` 给出 3dp / 6dp（同样是 2 倍关系）
-- 字体：标签 9dp/Semibold 灰，数值 12dp/Light（低于 40% 才染色）
+- 字体：标签 10dp/Semibold 灰，数值 13dp/400（低于 40% 才染色）
 - 默认落点：工作区右下角内缩 14dp；拖动后位置写入 `state.json.mini_pos`，按所在显示器工作区夹取
 - 拖动判定：位移 > 3px 才算拖动，否则算点击
 
@@ -422,7 +422,7 @@ Canvas（Vec<u32>，预乘 BGRA）
   ├─ round_rect / ring_round / shadow  → 圆角矩形 SDF，coverage = clamp(0.5-d, 0, 1)
   ├─ polygon                           → 3×3 超采样的奇偶规则扫描线填充（沙漏两半的轮廓）
   ├─ bar / circle                      → 组合上面的原语
-  └─ text                              → GDI 白字黑底 DIB → 亮度当 alpha → 手工合成
+  └─ text                              → 目标像素拷进临时 DIB → GDI 就地压字 → 逐通道混合回写
         ↓
   Surface（CreateDIBSection，窗口大小的持久 DIB）
         ↓  memcpy + UpdateLayeredWindow(ULW_ALPHA, AC_SRC_OVER/AC_SRC_ALPHA)
@@ -432,8 +432,9 @@ Canvas（Vec<u32>，预乘 BGRA）
 三个实现要点：
 
 1. **预乘 alpha**：所有混合都是 `dst = src·a + dst·(1-a)`，边界正确、可叠加，`UpdateLayeredWindow` 也正好要预乘数据。
-2. **文字 alpha**：GDI 的 `DrawTextW` 只写 RGB、不写 alpha，直接画到 ARGB 位图上会得到透明字。做法是把字画成"白字黑底"的临时 DIB，取 `max(r,g,b)` 当覆盖率，再用这个覆盖率把目标色合成进 Canvas。字体用 `ANTIALIASED_QUALITY`（灰度抗锯齿）而不是 ClearType，避免彩色子像素污染覆盖率。一次绘制约 10 段文字，临时 DIB 即用即删，代价可忽略。
-3. **DPI**：`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，所有度量都是 dp × `scale`（`GetDpiForWindow / 96`），字号按缩放后像素值创建。
+2. **文字的渲染路径**：GDI 的 `DrawTextW` 只写 RGB、不写 alpha，直接画到 ARGB 位图上会得到透明字；而"白字黑底取亮度当蒙版"会丢掉 hinting 之外的一切，小字看起来像放大过头的位图。现在的做法是**让 GDI 直接往目标像素上画**：把文字框内的 Canvas 像素（反预乘成直通 alpha）拷进临时 DIB，用最终颜色 `SetTextColor` 画上去，再按 `c.a` 做逐通道 lerp 写回。逐通道而非统一 alpha，是为了让半透明文字也保留 GDI 的次像素覆盖。前提是文字底下必须不透明（两个界面都先铺卡片），这也是回写能是一次简单 lerp 的原因。
+3. **为什么不用 ClearType**：子像素抗锯齿的前提是"背景已知、像素不被二次缩放"。这里表面由 DWM 按显示缩放合成，11–12px 的汉字只有 1px 笔画，彩色边缘读起来是噪点而不是锐度；实测（见 `target/v-ct` vs `target/v-aa` 的对照）灰度抗锯齿在每个字号上都更均匀。所以字体质量是 `ANTIALIASED_QUALITY`。
+4. **DPI**：`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，所有度量都是 dp × `scale`（`GetDpiForWindow / 96`），字号按缩放后像素值创建。字体族必须按名字选（`Segoe UI Light` / `Semibold`），因为 GDI 的 `lfWeight` 只在族内匹配，300/600 会退化成 Regular/Bold。
 
 命中测试用同一套 dp 常量（`ui::hit_test`），所以视觉与点击区域不会错位；动过布局常量只需改一处。
 

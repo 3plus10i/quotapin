@@ -93,14 +93,21 @@ pub fn draw_mark(c: &mut Canvas, x: f32, y: f32, size: f32, top: Rgba, bottom: R
     let s = size;
     let cx = x + s * 0.5;
     let mid = y + s * 0.5;
-    let hw = s * 0.300; // glass half width at the rim
-    let nw = s * 0.042; // half width at the waist
-    let r = s * 0.105; // rim corner radius
-    let h = s * 0.40; // rim to waist
+    let hw = s * MARK_HW;
+    let nw = s * MARK_NW;
+    let r = s * MARK_R;
+    let h = s * MARK_H;
 
     glass_half(c, cx, mid, h, hw, nw, r, true, top);
     glass_half(c, cx, mid, h, hw, nw, r, false, bottom);
 }
+
+/// Mark proportions, in fractions of the icon size. Shared with `--svg` so the
+/// vector asset and the rasterised icon stay identical.
+pub const MARK_HW: f32 = 0.300; // glass half width at the rim
+pub const MARK_NW: f32 = 0.052; // half width at the waist
+pub const MARK_R: f32 = 0.105; // rim corner radius
+pub const MARK_H: f32 = 0.40; // rim to waist
 
 /// One half of the glass, as a closed outline: a rim with rounded corners,
 /// walls that bow slightly inward, and a short straight neck.
@@ -121,7 +128,7 @@ pub(crate) fn glass_outline(
     };
     let width = |dy: f32| -> f32 {
         let u = (((dy - r) / (h - r)) / TAPER).clamp(0.0, 1.0);
-        nw + (hw - nw) * (1.0 - u).powf(0.90)
+        nw + (hw - nw) * (1.0 - u).powf(0.75)
     };
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(2 * N + 20);
 

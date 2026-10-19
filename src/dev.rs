@@ -158,10 +158,10 @@ pub fn write_svg(path: &str, tile: bool) {
     };
     let cx = inset + s * 0.5;
     let mid = inset + s * 0.5;
-    let hw = s * 0.300;
-    let nw = s * 0.042;
-    let r = s * 0.105;
-    let h = s * 0.40;
+    let hw = s * ui::MARK_HW;
+    let nw = s * ui::MARK_NW;
+    let r = s * ui::MARK_R;
+    let h = s * ui::MARK_H;
 
     let fmt = |pts: &[(f32, f32)]| -> String {
         pts.iter()

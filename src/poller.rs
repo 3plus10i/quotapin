@@ -8,7 +8,7 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::api::{self, Snapshot};
-use crate::config::Config;
+use crate::config::{Config, Mark};
 use crate::sys;
 use crate::ui::{RowView, View};
 
@@ -57,18 +57,16 @@ fn short_label(limit_secs: i64, label: &str) -> String {
 }
 
 fn build_view(snap: &Snapshot, cfg: &Config, last_ok: Option<&Snapshot>, now: i64) -> View {
+    let to_row = |r: &crate::api::Row| RowView {
+        label: r.label.clone(),
+        short: short_label(r.window.limit_secs, &r.label),
+        limit_secs: r.window.limit_secs,
+        used: r.window.used,
+        remaining: r.window.remaining(),
+        reset_at: r.window.reset_at,
+    };
     let mut v = View {
-        rows: snap
-            .rows
-            .iter()
-            .map(|r| RowView {
-                label: r.label.clone(),
-                short: short_label(r.window.limit_secs, &r.label),
-                used: r.window.used,
-                remaining: r.window.remaining(),
-                reset_at: r.window.reset_at,
-            })
-            .collect(),
+        rows: snap.rows.iter().map(to_row).collect(),
         credits: snap.credits_available,
         nearest_expiry: snap.nearest_credit_expiry(),
         at: if snap.ok { snap.at } else { last_ok.map(|s| s.at).unwrap_or(0) },
@@ -80,17 +78,7 @@ fn build_view(snap: &Snapshot, cfg: &Config, last_ok: Option<&Snapshot>, now: i6
     if v.at == 0 {
         // nothing successful yet: keep whatever the last good snapshot had
         if let Some(l) = last_ok {
-            v.rows = l
-                .rows
-                .iter()
-                .map(|r| RowView {
-                    label: r.label.clone(),
-                    short: short_label(r.window.limit_secs, &r.label),
-                    used: r.window.used,
-                    remaining: r.window.remaining(),
-                    reset_at: r.window.reset_at,
-                })
-                .collect();
+            v.rows = l.rows.iter().map(to_row).collect();
             v.credits = l.credits_available;
             v.nearest_expiry = l.nearest_credit_expiry();
         }
@@ -103,6 +91,19 @@ fn bucket(remaining: f64) -> i32 {
     ((remaining / 20.0).ceil() as i32).clamp(0, 5)
 }
 
+/// A window rolled over if its reset timestamp jumped forward, or — as a
+/// fallback for servers that keep the stamp — if usage fell off a cliff.
+///
+/// This is deliberately independent of the bucket: a cycle that only burns 5%
+/// of the quota stays in bucket 5 the whole time, so bucket comparison alone
+/// would miss the reset entirely.
+fn rolled_over(prev: &Mark, used: f64, reset_at: i64) -> bool {
+    if reset_at > 0 && prev.reset_at > 0 && reset_at > prev.reset_at + 120 {
+        return true;
+    }
+    used + 20.0 <= prev.used
+}
+
 fn process_notifications(
     snap: &Snapshot,
     cfg: &mut Config,
@@ -110,57 +111,62 @@ fn process_notifications(
     toasts: &mut Vec<Toast>,
 ) {
     for row in &snap.rows {
+        let used = row.window.used;
         let remaining = row.window.remaining();
+        let reset_at = row.window.reset_at;
         let b = bucket(remaining);
-        match cfg.buckets.get(&row.label).copied() {
-            None => {
-                // first observation: record silently, never notify on launch
-                cfg.buckets.insert(row.label.clone(), b);
-            }
-            Some(prev) if b < prev => {
-                cfg.buckets.insert(row.label.clone(), b);
-                let node = b * 20;
-                let (title, body) = if node == 0 {
-                    (
-                        format!("{}额度已用尽", row.label),
-                        format!(
-                            "重置 {} · {}",
-                            crate::fmt::stamp(row.window.reset_at, now),
-                            crate::fmt::countdown(row.window.reset_at, now)
-                        ),
-                    )
-                } else {
-                    (
-                        format!("{}额度剩余 {}%", row.label, node),
-                        format!(
-                            "已用 {}% · 重置 {}（{}）",
-                            crate::fmt::pct(row.window.used),
-                            crate::fmt::stamp(row.window.reset_at, now),
-                            crate::fmt::countdown(row.window.reset_at, now)
-                        ),
-                    )
-                };
-                toasts.push(Toast {
-                    title,
-                    body,
-                    kind: if node <= 20 { 1 } else { 0 },
-                });
-            }
-            Some(prev) if b > prev => {
-                // usage went back up -> a window rolled over
-                cfg.buckets.insert(row.label.clone(), b);
-                toasts.push(Toast {
-                    title: format!("{}额度已重置", row.label),
-                    body: format!(
-                        "已用 {}% · 下次重置 {}",
-                        crate::fmt::pct(row.window.used),
-                        crate::fmt::stamp(row.window.reset_at, now)
+        let Some(prev) = cfg.marks.get(&row.label).copied() else {
+            // first observation: record silently, never notify on launch
+            cfg.marks.insert(
+                row.label.clone(),
+                Mark { bucket: b, used, reset_at },
+            );
+            continue;
+        };
+
+        if rolled_over(&prev, used, reset_at) {
+            toasts.push(Toast {
+                title: format!("{}额度已重置", row.label),
+                body: format!(
+                    "已用 {} · 下次重置 {}",
+                    crate::fmt::pct(used),
+                    crate::fmt::stamp(reset_at, now)
+                ),
+                kind: 2,
+            });
+        } else if b < prev.bucket {
+            let node = b * 20;
+            let (title, body) = if node == 0 {
+                (
+                    format!("{}额度已用尽", row.label),
+                    format!(
+                        "重置 {} · {}",
+                        crate::fmt::stamp(reset_at, now),
+                        crate::fmt::countdown(reset_at, now)
                     ),
-                    kind: 2,
-                });
-            }
-            _ => {}
+                )
+            } else {
+                (
+                    format!("{}额度剩余 {}%", row.label, node),
+                    format!(
+                        "已用 {} · 重置 {}（{}）",
+                        crate::fmt::pct(used),
+                        crate::fmt::stamp(reset_at, now),
+                        crate::fmt::countdown(reset_at, now)
+                    ),
+                )
+            };
+            toasts.push(Toast {
+                title,
+                body,
+                kind: if node <= 20 { 1 } else { 0 },
+            });
         }
+
+        cfg.marks.insert(
+            row.label.clone(),
+            Mark { bucket: b, used, reset_at },
+        );
     }
 }
 
@@ -369,6 +375,10 @@ mod tests {
     use crate::api::{Row, Snapshot, WindowInfo};
 
     fn snap(used5: f64, used7: f64) -> Snapshot {
+        snap_r(used5, used7, 5_000, 9_000)
+    }
+
+    fn snap_r(used5: f64, used7: f64, reset5: i64, reset7: i64) -> Snapshot {
         Snapshot {
             at: 1_000,
             ok: true,
@@ -378,7 +388,7 @@ mod tests {
                     window: WindowInfo {
                         used: used5,
                         limit_secs: 18_000,
-                        reset_at: 5_000,
+                        reset_at: reset5,
                     },
                 },
                 Row {
@@ -386,7 +396,7 @@ mod tests {
                     window: WindowInfo {
                         used: used7,
                         limit_secs: 604_800,
-                        reset_at: 9_000,
+                        reset_at: reset7,
                     },
                 },
             ],
@@ -412,8 +422,15 @@ mod tests {
         let mut toasts = Vec::new();
         process_notifications(&snap(20.0, 8.0), &mut cfg, 1_000, &mut toasts);
         assert!(toasts.is_empty(), "launch must not notify");
-        assert_eq!(cfg.buckets.get("5 小时"), Some(&4));
-        assert_eq!(cfg.buckets.get("7 天"), Some(&5));
+        assert_eq!(
+            cfg.marks.get("5 小时"),
+            Some(&Mark {
+                bucket: 4,
+                used: 20.0,
+                reset_at: 5_000
+            })
+        );
+        assert_eq!(cfg.marks.get("7 天").map(|m| m.bucket), Some(5));
     }
 
     #[test]
@@ -457,7 +474,36 @@ mod tests {
         process_notifications(&snap(5.0, 50.0), &mut cfg, 1_000, &mut toasts);
         assert_eq!(toasts.len(), 1);
         assert!(toasts[0].title.contains("已重置"));
-        assert_eq!(cfg.buckets.get("5 小时"), Some(&5));
+        assert_eq!(cfg.marks.get("5 小时").map(|m| m.bucket), Some(5));
+    }
+
+    /// The whole point of tracking `reset_at`: a light cycle never leaves
+    /// bucket 5, so bucket comparison would stay silent forever.
+    #[test]
+    fn reset_is_noticed_even_when_usage_never_reached_20_percent() {
+        let mut cfg = Config::default();
+        let mut toasts = Vec::new();
+        // 3% used -> 97% remaining -> bucket 5, and still bucket 5 after reset
+        process_notifications(&snap_r(3.0, 2.0, 5_000, 9_000), &mut cfg, 1_000, &mut toasts);
+        assert!(toasts.is_empty());
+
+        // the 5h window rolled over; usage only moved 3 -> 1
+        process_notifications(&snap_r(1.0, 2.0, 25_000, 9_000), &mut cfg, 3_000, &mut toasts);
+        assert_eq!(toasts.len(), 1, "a light cycle must still report the reset");
+        assert!(toasts[0].title.contains("已重置"));
+        assert_eq!(toasts[0].kind, 2);
+        assert_eq!(cfg.marks.get("5 小时").map(|m| m.reset_at), Some(25_000));
+    }
+
+    #[test]
+    fn a_quiet_poll_never_notifies() {
+        let mut cfg = Config::default();
+        let mut toasts = Vec::new();
+        process_notifications(&snap(31.0, 12.0), &mut cfg, 1_000, &mut toasts);
+        for _ in 0..5 {
+            process_notifications(&snap(31.0, 12.0), &mut cfg, 2_000, &mut toasts);
+        }
+        assert!(toasts.is_empty());
     }
 
     #[test]

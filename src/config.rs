@@ -8,6 +8,18 @@ use std::path::PathBuf;
 
 use crate::sys;
 
+/// What the previous poll saw for one quota window. Two independent signals are
+/// needed: the 20% bucket drives the "quota dropped to N%" toasts, while
+/// `reset_at` / `used` are what actually prove a window rolled over — a cycle
+/// that never burns 20% never changes bucket, yet still resets.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Mark {
+    /// ceil(remaining / 20) in 0..=5
+    pub bucket: i32,
+    pub used: f64,
+    pub reset_at: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// remembered position of the mini widget (screen coords, top-left)
@@ -16,8 +28,8 @@ pub struct Config {
     pub pinned: bool,
     /// show "used" instead of "remaining" in the big number
     pub show_used: bool,
-    /// last notified remaining bucket per window key ("5h" -> 0..=5)
-    pub buckets: BTreeMap<String, i32>,
+    /// last seen state per window key ("5 小时" -> Mark)
+    pub marks: BTreeMap<String, Mark>,
     /// reset-credit ids we already warned about
     pub warned_credits: Vec<String>,
     /// last local day the expiry check ran ("2026-10-19")
@@ -32,7 +44,7 @@ impl Default for Config {
             mini_pos: None,
             pinned: false,
             show_used: false,
-            buckets: BTreeMap::new(),
+            marks: BTreeMap::new(),
             warned_credits: Vec::new(),
             expiry_day: String::new(),
             extra_procs: Vec::new(),
@@ -63,10 +75,18 @@ impl Config {
         }
         c.pinned = v.get("pinned").and_then(|x| x.as_bool()).unwrap_or(false);
         c.show_used = v.get("show_used").and_then(|x| x.as_bool()).unwrap_or(false);
-        if let Some(obj) = v.get("buckets").and_then(|x| x.as_object()) {
+        if let Some(obj) = v.get("marks").and_then(|x| x.as_object()) {
             for (k, val) in obj {
-                if let Some(n) = val.as_i64() {
-                    c.buckets.insert(k.clone(), n as i32);
+                let bucket = val.get("bucket").and_then(|x| x.as_i64());
+                if let Some(b) = bucket {
+                    c.marks.insert(
+                        k.clone(),
+                        Mark {
+                            bucket: b as i32,
+                            used: val.get("used").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                            reset_at: val.get("reset_at").and_then(|x| x.as_i64()).unwrap_or(0),
+                        },
+                    );
                 }
             }
         }
@@ -95,16 +115,25 @@ impl Config {
     pub fn save(&self) {
         let dir = sys::app_data_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let buckets: serde_json::Map<String, serde_json::Value> = self
-            .buckets
+        let marks: serde_json::Map<String, serde_json::Value> = self
+            .marks
             .iter()
-            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+            .map(|(k, m)| {
+                (
+                    k.clone(),
+                    serde_json::json!({
+                        "bucket": m.bucket,
+                        "used": m.used,
+                        "reset_at": m.reset_at,
+                    }),
+                )
+            })
             .collect();
         let v = serde_json::json!({
             "mini_pos": self.mini_pos.map(|(x, y)| serde_json::json!([x, y])),
             "pinned": self.pinned,
             "show_used": self.show_used,
-            "buckets": buckets,
+            "marks": marks,
             "warned_credits": self.warned_credits,
             "expiry_day": self.expiry_day,
             "extra_procs": self.extra_procs,

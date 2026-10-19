@@ -386,21 +386,13 @@ impl Canvas {
     /// its best work when it can write straight onto the destination pixels:
     /// hinting snaps stems onto the pixel grid and ClearType adds per-channel
     /// coverage. So the target region is copied into a scratch DIB, the glyphs
-    /// are composited onto it in final colour, and the pixels are blended back.
+    /// are composited onto it in final colour, and the result is folded back to
+    /// one coverage per pixel — ClearType's *shape*, not its colour. Thin CJK
+    /// strokes carrying orange and blue edges read as dirt at this panel size.
     ///
-    /// Drawing white-on-black and reusing the brightness as an alpha mask — what
-    /// this used to do — flattens each pixel to a single coverage value, which
-    /// throws away the subpixel coverage and leaves exactly the ragged,
-    /// over-enlarged-bitmap look that comes from hinting alone.
-    ///
-    /// The backdrop under a text run must be opaque (both surfaces paint their
-    /// card first), which is what makes the blend back a plain lerp.
-    ///
-    /// ClearType is deliberately *not* used. Subpixel AA pays off when text sits
-    /// on a known, unscaled opaque background; here the surface is composited by
-    /// DWM at whatever scale the display asks for, and 1px CJK strokes at 11-12px
-    /// get coloured edges that read as noise rather than as sharpness. Grayscale
-    /// AA stays even at every size, which is what "smooth" looks like.
+    /// The backdrop may be translucent (the mini card is), so the blend happens
+    /// in straight alpha and is re-premultiplied; lerping a straight result into
+    /// a premultiplied buffer leaves a bright rectangle behind the run.
     #[allow(clippy::too_many_arguments)]
     pub fn text(
         &mut self,
@@ -463,7 +455,7 @@ impl Canvas {
             }
 
             let old_bmp = SelectObject(dc, bmp as _);
-            let old_font = SelectObject(dc, font.handle as _);
+            let old_font = SelectObject(dc, font.handle(s) as _);
             SetBkMode(dc, TRANSPARENT as i32);
             // COLORREF is 0x00BBGGRR
             SetTextColor(dc, ((c.b as u32) << 16) | ((c.g as u32) << 8) | c.r as u32);
@@ -484,22 +476,55 @@ impl Canvas {
                 };
             DrawTextW(dc, utf16.as_ptr(), utf16.len() as i32, &mut rc, fmt);
 
-            // blend back per channel, so translucent text keeps its fringes
+            // GDI gave us subpixel coverage (three different coverages per pixel,
+            // one per channel). Collapse it back to a single coverage and paint
+            // that: the *shape* quality of ClearType without its colour fringes,
+            // which on a 300px panel of thin strokes read as dirt rather than as
+            // sharpness. The blend happens in straight alpha and is re-premultiplied
+            // because the backdrop may be translucent (the mini card is).
             let t = c.a as f32 / 255.0;
+            let ink = [c.r as f32, c.g as f32, c.b as f32];
             for row in 0..bh {
                 for col in 0..bw {
                     let o = *px.add((row * bw + col) as usize);
-                    if o == 0 {
-                        continue;
-                    }
                     let di = ((by + row) * self.w + bx + col) as usize;
                     let d = self.px[di];
-                    let mix = |sh: u32| {
-                        let dv = ((d >> sh) & 0xFF) as f32;
-                        let ov = ((o >> sh) & 0xFF) as f32;
-                        (dv + (ov - dv) * t).round().clamp(0.0, 255.0) as u32
-                    };
-                    self.px[di] = (d & 0xFF00_0000) | (mix(16) << 16) | (mix(8) << 8) | mix(0);
+                    let a = (d >> 24) & 0xFF;
+                    if a == 0 {
+                        continue;
+                    }
+                    let ds = straight(d);
+                    let back = [
+                        ((ds >> 16) & 0xFF) as f32,
+                        ((ds >> 8) & 0xFF) as f32,
+                        (ds & 0xFF) as f32,
+                    ];
+                    let drawn = [
+                        ((o >> 16) & 0xFF) as f32,
+                        ((o >> 8) & 0xFF) as f32,
+                        (o & 0xFF) as f32,
+                    ];
+                    // the channel the ink moves furthest reads the coverage most
+                    // reliably, so take it from there and apply it to all three
+                    let k = (0..3)
+                        .max_by(|&x, &y| {
+                            let dx = (ink[x] - back[x]).abs();
+                            let dy = (ink[y] - back[y]).abs();
+                            dx.partial_cmp(&dy).unwrap()
+                        })
+                        .unwrap_or(0);
+                    let span = ink[k] - back[k];
+                    if span.abs() < 1.0 {
+                        continue; // text is the same colour as the card
+                    }
+                    let cov = ((drawn[k] - back[k]) / span).clamp(0.0, 1.0) * t;
+                    let mut px_out = a << 24;
+                    for ch in 0..3 {
+                        let v = back[ch] + (ink[ch] - back[ch]) * cov;
+                        let v = (v * a as f32 + 127.0) / 255.0;
+                        px_out |= (v.round().clamp(0.0, 255.0) as u32) << (16 - 8 * ch);
+                    }
+                    self.px[di] = px_out;
                 }
             }
 
@@ -535,25 +560,42 @@ pub enum Align {
 // ---------------------------------------------------------------- font
 
 pub struct Font {
-    handle: HFONT,
+    latin: HFONT,
+    cjk: HFONT,
 }
 
 unsafe impl Send for Font {}
 
 impl Font {
     pub fn new(px: i32, weight: i32) -> Self {
-        // GDI matches weight *within* a family, and the "Segoe UI" family only
-        // ships Regular/Bold — a LOGFONT weight of 300 or 600 therefore snaps
-        // back to Regular or Bold. The lighter and semibold cuts live in their
-        // own families, so pick the face by name and keep lfWeight neutral.
-        let name = match weight {
+        // GDI matches weight *within* a family, and both "Segoe UI" and
+        // "Microsoft YaHei UI" only ship Regular/Bold — a LOGFONT weight of 300
+        // or 600 snaps back to Regular/Bold. The lighter and semibold cuts live
+        // in their own families, so pick the face by name and keep lfWeight neutral.
+        let latin_name = match weight {
             w if w <= 350 => "Segoe UI Light",
             w if w <= 450 => "Segoe UI",
             w if w < 650 => "Segoe UI Semibold",
             _ => "Segoe UI Bold",
         };
+        // Chinese must not go through GDI's font linking: Segoe has no CJK, and
+        // the linked face (SimSun) carries embedded bitmaps that GDI happily
+        // uses at UI sizes — 12-13px glyphs then come out as un-antialiased
+        // bitmaps with broken diagonals. Naming a CJK family keeps outlines.
+        let cjk_name = match weight {
+            w if w <= 350 => "Microsoft YaHei UI Light",
+            w if w < 650 => "Microsoft YaHei UI",
+            _ => "Microsoft YaHei Bold",
+        };
+        Self {
+            latin: Self::realize(latin_name, px),
+            cjk: Self::realize(cjk_name, px),
+        }
+    }
+
+    fn realize(name: &str, px: i32) -> HFONT {
         let face = crate::sys::wide(name);
-        let handle = unsafe {
+        unsafe {
             CreateFontW(
                 -px,
                 0,
@@ -563,15 +605,23 @@ impl Font {
                 0,
                 0,
                 0,
-                1, // DEFAULT_CHARSET, lets GDI fall back to a CJK face
+                1, // DEFAULT_CHARSET
                 0,
                 0,
-                4, // ANTIALIASED_QUALITY: grayscale AA
+                5, // CLEARTYPE_QUALITY: what every other Windows app uses
                 0,
                 face.as_ptr(),
             )
-        };
-        Self { handle }
+        }
+    }
+
+    /// The face a string should be drawn in.
+    fn handle(&self, s: &str) -> HFONT {
+        if s.is_ascii() {
+            self.latin
+        } else {
+            self.cjk
+        }
     }
 
     /// Pixel width of a string in this font.
@@ -585,7 +635,7 @@ impl Font {
             if dc.is_null() {
                 return 0;
             }
-            let old = SelectObject(dc, self.handle as _);
+            let old = SelectObject(dc, self.handle(s) as _);
             let mut size = SIZE { cx: 0, cy: 0 };
             GetTextExtentPoint32W(dc, utf16.as_ptr(), utf16.len() as i32, &mut size);
             SelectObject(dc, old);
@@ -597,9 +647,11 @@ impl Font {
 
 impl Drop for Font {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe {
-                DeleteObject(self.handle as _);
+        unsafe {
+            for h in [self.latin, self.cjk] {
+                if !h.is_null() {
+                    DeleteObject(h as _);
+                }
             }
         }
     }

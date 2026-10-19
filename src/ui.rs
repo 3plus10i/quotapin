@@ -222,11 +222,11 @@ impl Fonts {
     pub fn new(scale: f32) -> Self {
         let px = |dp: f32| (dp * scale).round().max(8.0) as i32;
         Self {
-            title: Font::new(px(12.5), 600),
-            label: Font::new(px(12.0), 400),
+            title: Font::new(px(13.0), 600),
+            label: Font::new(px(12.5), 400),
             value: Font::new(px(21.0), 300),
-            meta: Font::new(px(11.5), 400),
-            strong: Font::new(px(12.0), 600),
+            meta: Font::new(px(12.0), 400),
+            strong: Font::new(px(12.5), 600),
             mini_label: Font::new(px(10.0), 600),
             mini_value: Font::new(px(13.0), 400),
         }

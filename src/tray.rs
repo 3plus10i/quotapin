@@ -11,7 +11,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuItem, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW,
-    SetForegroundWindow, TrackPopupMenu, HICON, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN,
+    DestroyIcon, SetForegroundWindow, TrackPopupMenu, HICON, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
@@ -60,6 +60,10 @@ impl Tray {
         nid.hIcon = icon;
         unsafe {
             Shell_NotifyIconW(NIM_MODIFY, &nid);
+            // the shell already took the new icon, the old one is ours to free
+            if !self.icon.is_null() {
+                DestroyIcon(self.icon);
+            }
         }
         self.icon = icon;
     }

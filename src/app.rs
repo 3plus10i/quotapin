@@ -376,6 +376,12 @@ impl App {
             .lock()
             .map(|mut s| std::mem::take(&mut s.toasts))
             .unwrap_or_default();
+        // 静默运行: the queue is drained either way. Dropped events are not
+        // replayed when notifications come back on — silence means "do not
+        // tell me now", not "hold it for later".
+        if self.cfg.lock().map(|c| c.muted).unwrap_or(false) {
+            return;
+        }
         for t in toasts.into_iter().take(3) {
             self.tray.notify(&t.title, &t.body, t.kind);
         }
@@ -432,6 +438,13 @@ impl App {
                     self.show_mini(true);
                 }
             }
+            tray::MENU_MUTE => {
+                {
+                    let mut c = self.cfg.lock().unwrap();
+                    c.muted = !c.muted;
+                }
+                self.save_cfg();
+            }
             tray::MENU_AUTOSTART => {
                 if sys::run_value_get().is_some() {
                     sys::run_value_delete();
@@ -485,14 +498,16 @@ unsafe extern "system" fn wndproc_msg(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             match lp as u32 {
                 WM_LBUTTONUP | WM_LBUTTONDBLCLK => app().toggle_popover(Anchor::Tray),
                 WM_RBUTTONUP => {
-                    let (pinned, auto) = {
+                    let (pinned, muted, auto) = {
                         let a = app();
-                        (
-                            a.cfg.lock().map(|c| c.pinned).unwrap_or(false),
-                            sys::run_value_get().is_some(),
-                        )
+                        let (pinned, muted) = a
+                            .cfg
+                            .lock()
+                            .map(|c| (c.pinned, c.muted))
+                            .unwrap_or((false, false));
+                        (pinned, muted, sys::run_value_get().is_some())
                     };
-                    let cmd = tray::show_menu(hwnd, pinned, auto);
+                    let cmd = tray::show_menu(hwnd, pinned, muted, auto);
                     if cmd != 0 {
                         app().on_menu(cmd);
                     }
@@ -658,14 +673,16 @@ unsafe extern "system" fn wndproc_mini(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             0
         }
         WM_RBUTTONUP => {
-            let (pinned, auto) = {
+            let (pinned, muted, auto) = {
                 let a = app();
-                (
-                    a.cfg.lock().map(|c| c.pinned).unwrap_or(false),
-                    sys::run_value_get().is_some(),
-                )
+                let (pinned, muted) = a
+                    .cfg
+                    .lock()
+                    .map(|c| (c.pinned, c.muted))
+                    .unwrap_or((false, false));
+                (pinned, muted, sys::run_value_get().is_some())
             };
-            let cmd = tray::show_menu(hwnd, pinned, auto);
+            let cmd = tray::show_menu(hwnd, pinned, muted, auto);
             if cmd != 0 {
                 app().on_menu(cmd);
             }

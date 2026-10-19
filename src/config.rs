@@ -26,6 +26,8 @@ pub struct Config {
     pub mini_pos: Option<(i32, i32)>,
     /// pin the mini widget even when Codex is not in the foreground
     pub pinned: bool,
+    /// 静默运行: drop notifications instead of showing them
+    pub muted: bool,
     /// show "used" instead of "remaining" in the big number
     pub show_used: bool,
     /// last seen state per window key ("5 小时" -> Mark)
@@ -43,6 +45,7 @@ impl Default for Config {
         Self {
             mini_pos: None,
             pinned: false,
+            muted: false,
             show_used: false,
             marks: BTreeMap::new(),
             warned_credits: Vec::new(),
@@ -58,13 +61,18 @@ pub fn path() -> PathBuf {
 
 impl Config {
     pub fn load() -> Self {
-        let p = path();
-        let Ok(raw) = std::fs::read_to_string(&p) else {
+        let Ok(raw) = std::fs::read_to_string(path()) else {
             return Self::default();
         };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            return Self::default();
-        };
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) => Self::from_value(&v),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Parse the on-disk shape. Every field is optional, so a file written by an
+    /// older build (or edited by hand) still loads and just takes defaults.
+    fn from_value(v: &serde_json::Value) -> Self {
         let mut c = Self::default();
         if let Some(arr) = v.get("mini_pos").and_then(|x| x.as_array()) {
             if arr.len() == 2 {
@@ -74,6 +82,7 @@ impl Config {
             }
         }
         c.pinned = v.get("pinned").and_then(|x| x.as_bool()).unwrap_or(false);
+        c.muted = v.get("muted").and_then(|x| x.as_bool()).unwrap_or(false);
         c.show_used = v.get("show_used").and_then(|x| x.as_bool()).unwrap_or(false);
         if let Some(obj) = v.get("marks").and_then(|x| x.as_object()) {
             for (k, val) in obj {
@@ -115,6 +124,14 @@ impl Config {
     pub fn save(&self) {
         let dir = sys::app_data_dir();
         let _ = std::fs::create_dir_all(&dir);
+        let body = serde_json::to_string_pretty(&self.to_value()).unwrap_or_else(|_| "{}".into());
+        let tmp = dir.join("state.json.tmp");
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, dir.join("state.json"));
+        }
+    }
+
+    fn to_value(&self) -> serde_json::Value {
         let marks: serde_json::Map<String, serde_json::Value> = self
             .marks
             .iter()
@@ -129,19 +146,54 @@ impl Config {
                 )
             })
             .collect();
-        let v = serde_json::json!({
+        serde_json::json!({
             "mini_pos": self.mini_pos.map(|(x, y)| serde_json::json!([x, y])),
             "pinned": self.pinned,
+            "muted": self.muted,
             "show_used": self.show_used,
             "marks": marks,
             "warned_credits": self.warned_credits,
             "expiry_day": self.expiry_day,
             "extra_procs": self.extra_procs,
-        });
-        let body = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into());
-        let tmp = dir.join("state.json.tmp");
-        if std::fs::write(&tmp, body).is_ok() {
-            let _ = std::fs::rename(&tmp, dir.join("state.json"));
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 静默运行 has to survive a restart, and a file written before it existed
+    /// has to load as "not muted" instead of failing the whole parse.
+    #[test]
+    fn muting_round_trips_and_old_files_default_to_loud() {
+        let mut c = Config::default();
+        c.muted = true;
+        assert!(Config::from_value(&c.to_value()).muted);
+
+        let legacy = serde_json::json!({ "pinned": true, "show_used": false });
+        let parsed = Config::from_value(&legacy);
+        assert!(!parsed.muted);
+        assert!(parsed.pinned);
+    }
+
+    #[test]
+    fn marks_and_credits_still_make_the_round_trip() {
+        let mut c = Config::default();
+        c.marks.insert(
+            "5 小时".into(),
+            Mark {
+                bucket: 4,
+                used: 21.0,
+                reset_at: 1_792_414_440,
+            },
+        );
+        c.warned_credits.push("abc".into());
+        c.mini_pos = Some((10, 20));
+        let back = Config::from_value(&c.to_value());
+        assert_eq!(back.marks["5 小时"].bucket, 4);
+        assert_eq!(back.marks["5 小时"].used, 21.0);
+        assert_eq!(back.warned_credits, vec!["abc".to_string()]);
+        assert_eq!(back.mini_pos, Some((10, 20)));
     }
 }

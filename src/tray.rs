@@ -24,6 +24,7 @@ pub const MENU_REFRESH: u32 = 1;
 pub const MENU_PIN: u32 = 2;
 pub const MENU_AUTOSTART: u32 = 3;
 pub const MENU_QUIT: u32 = 4;
+pub const MENU_MUTE: u32 = 5;
 
 pub struct Tray {
     pub hwnd: HWND,
@@ -129,7 +130,7 @@ impl Tray {
 }
 
 /// Right-click menu. Returns the chosen command, or 0 when dismissed.
-pub fn show_menu(hwnd: HWND, pinned: bool, autostart: bool) -> u32 {
+pub fn show_menu(hwnd: HWND, pinned: bool, muted: bool, autostart: bool) -> u32 {
     unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
@@ -137,17 +138,22 @@ pub fn show_menu(hwnd: HWND, pinned: bool, autostart: bool) -> u32 {
         }
         let s_refresh = sys::wide("立即刷新");
         let s_pin = sys::wide("小窗常驻");
+        let s_mute = sys::wide("静默运行");
         let s_auto = sys::wide("开机自启");
         let s_quit = sys::wide("退出");
 
         AppendMenuW(menu, MF_STRING, MENU_REFRESH as usize, s_refresh.as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_PIN as usize, s_pin.as_ptr());
+        AppendMenuW(menu, MF_STRING, MENU_MUTE as usize, s_mute.as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_AUTOSTART as usize, s_auto.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, MENU_QUIT as usize, s_quit.as_ptr());
 
         if pinned {
             CheckMenuItem(menu, MENU_PIN, MF_CHECKED);
+        }
+        if muted {
+            CheckMenuItem(menu, MENU_MUTE, MF_CHECKED);
         }
         if autostart {
             CheckMenuItem(menu, MENU_AUTOSTART, MF_CHECKED);

@@ -433,7 +433,7 @@ Canvas（Vec<u32>，预乘 BGRA）
 
 1. **预乘 alpha**：所有混合都是 `dst = src·a + dst·(1-a)`，边界正确、可叠加，`UpdateLayeredWindow` 也正好要预乘数据。
 2. **文字的渲染路径**：GDI 的 `DrawTextW` 只写 RGB、不写 alpha，直接画到 ARGB 位图上会得到透明字；而"白字黑底取亮度当蒙版"会丢掉 hinting 之外的一切，小字看起来像放大过头的位图。现在的做法是**让 GDI 直接往目标像素上画**：把文字框内的 Canvas 像素（反预乘成直通 alpha）拷进临时 DIB，用最终颜色 `SetTextColor` 画上去，再按 `c.a` 做逐通道 lerp 写回。逐通道而非统一 alpha，是为了让半透明文字也保留 GDI 的次像素覆盖。前提是文字底下必须不透明（两个界面都先铺卡片），这也是回写能是一次简单 lerp 的原因。
-3. **为什么不用 ClearType**：子像素抗锯齿的前提是"背景已知、像素不被二次缩放"。这里表面由 DWM 按显示缩放合成，11–12px 的汉字只有 1px 笔画，彩色边缘读起来是噪点而不是锐度；实测（见 `target/v-ct` vs `target/v-aa` 的对照）灰度抗锯齿在每个字号上都更均匀。所以字体质量是 `ANTIALIASED_QUALITY`。
+3. **为什么不用 ClearType**：子像素抗锯齿的前提是"背景已知、像素不被二次缩放"。这里表面由 DWM 按显示缩放合成，11–12px 的汉字只有 1px 笔画，彩色边缘读起来是噪点而不是锐度。改动时做过对照（同一份 UI 只切 `lfQuality` 渲两遍，用 `scripts/crop.py` 放大 6–8 倍比 21dp 数字、面板正文、小窗标签）：灰度抗锯齿在每个字号上都更均匀。所以字体质量是 `ANTIALIASED_QUALITY`。
 4. **DPI**：`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，所有度量都是 dp × `scale`（`GetDpiForWindow / 96`），字号按缩放后像素值创建。字体族必须按名字选（`Segoe UI Light` / `Semibold`），因为 GDI 的 `lfWeight` 只在族内匹配，300/600 会退化成 Regular/Bold。
 
 命中测试用同一套 dp 常量（`ui::hit_test`），所以视觉与点击区域不会错位；动过布局常量只需改一处。
@@ -489,6 +489,7 @@ QuotaPin.exe --icon <path>    # 重新生成 assets/icon.ico（改了 draw_mark 
 QuotaPin.exe --svg <path> [--tile]  # 重新生成 assets/logo.svg / logo-mark.svg（同一份几何）
 python scripts/bmp2png.py <dir>       # BMP → PNG（走查用，纯 stdlib）
 python scripts/grab.py <out.bmp>      # 抓运行中窗口的像素，不需要可见桌面
+python scripts/crop.py in.png out.png x y w h 6   # 裁一块并最近邻放大，逐像素看走查
 ```
 
 `--render` 的意义：视觉改动能离线成图、可 diff、可进文档，不必在真机上反复点。

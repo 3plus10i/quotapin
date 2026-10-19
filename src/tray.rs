@@ -10,9 +10,9 @@ use windows_sys::Win32::UI::Shell::{
     NOTIFYICONDATAW_0, NOTIFYICONIDENTIFIER,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CheckMenuItem, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW,
-    SetForegroundWindow, TrackPopupMenu, HICON, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+    AppendMenuW, CheckMenuItem, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
+    PostMessageW, SetForegroundWindow, TrackPopupMenu, HICON, MF_CHECKED, MF_SEPARATOR, MF_STRING,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
 use crate::sys;
@@ -58,6 +58,23 @@ impl Tray {
         unsafe {
             Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
+    }
+
+    /// Swap the icon. The shell copies it on NIM_MODIFY, so the old one can go
+    /// straight away; `self.icon` always holds a live handle (it doubles as the
+    /// balloon's custom icon).
+    pub fn set_icon(&mut self, icon: HICON) {
+        if icon.is_null() {
+            return;
+        }
+        let mut nid = base_data(self.hwnd);
+        nid.uFlags = NIF_ICON;
+        nid.hIcon = icon;
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
+            DestroyIcon(self.icon);
+        }
+        self.icon = icon;
     }
 
     /// Balloon / toast. `kind`: 0 info, 1 warning, 2 custom(user) icon-less.

@@ -136,15 +136,21 @@ pub fn render_all(dir: &str) {
         save_bmp(&c, bg, &format!("{dir}/mini-{mode}.bmp"));
     }
 
-    // the mark at 4x, on both backdrops
-    let mut c = Canvas::new(128, 128);
-    mark::draw(&mut c, 0.0, 0.0, 128.0);
+    // the three mark variants at 4x, side by side
+    let mut c = Canvas::new(384, 128);
+    for v in 0..3 {
+        mark::draw(&mut c, (v * 128) as f32, 0.0, 128.0, v);
+    }
     save_bmp(&c, Rgba::hex(0x101317), &format!("{dir}/logo.bmp"));
 
-    // the sizes the shell actually asks for, for judging legibility
-    let mut c = Canvas::new(196, 52);
-    for (x, size) in [(6.0, 16.0), (28.0, 20.0), (54.0, 24.0), (84.0, 32.0), (122.0, 40.0)] {
-        mark::draw(&mut c, x, 6.0, size);
+    // the sizes the shell actually asks for, one row per variant, for judging
+    // legibility at 16px where the art has to survive four inks in one pixel
+    let mut c = Canvas::new(196, 138);
+    for v in 0..3 {
+        let y = 6.0 + v as f32 * 44.0;
+        for (x, size) in [(6.0, 16.0), (28.0, 20.0), (54.0, 24.0), (84.0, 32.0), (122.0, 40.0)] {
+            mark::draw(&mut c, x, y, size, v);
+        }
     }
     save_bmp(&c, Rgba::hex(0xF2F4F7), &format!("{dir}/marks.bmp"));
 }

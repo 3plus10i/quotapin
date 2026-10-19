@@ -37,7 +37,7 @@ GET chatgpt.com/backend-api/wham/rate-limit-reset-credits → 每个机会的 id
 
 | 界面 | 何时出现 | 承载什么 |
 | --- | --- | --- |
-| 托盘图标（16px 沙漏） | 一直在 | 产品标，固定配色；状态不在这里，见 §7 |
+| 托盘图标（16px 沙漏） | 一直在 | 产品标 + 5h 余量的粗档位（满 / 半 / 见底），见 §7 |
 | 面板（300dp 卡片） | 单击托盘 / 单击小窗 | 两行完整数据 + 底部重置机会；行可点击切换「剩余 / 已用」 |
 | 小窗（158×50 卡片） | Codex/ChatGPT 在前台，或用户勾了「小窗常驻」 | 两条迷你进度条；可拖动、位置记忆、单击弹面板 |
 
@@ -76,22 +76,22 @@ main ─→ app ─→ ui ─→ canvas
 
 | 文件 | 行 | 职责 |
 | --- | --- | --- |
-| `ui.rs` | 677 | 主题、托盘图标封装、面板 / 小窗绘制、命中测试、全部度量常量 |
-| `app.rs` | 693 | 三个窗口过程、显隐与定位、菜单、提示条刷新 |
-| `canvas.rs` | 716 | 软件光栅器、文字就地绘制、位图缩放、分层窗口 surface |
+| `ui.rs` | 678 | 主题、托盘图标封装、面板 / 小窗绘制、命中测试、全部度量常量 |
+| `app.rs` | 722 | 三个窗口过程、显隐与定位、菜单、提示条与图标换档 |
+| `canvas.rs` | 768 | 软件光栅器、文字就地绘制、位图缩放、分层窗口 surface |
 | `poller.rs` | 515 | 轮询节奏、通知状态机、`Snapshot → View` 投影 |
 | `api.rs` | 494 | 凭证读取、WinHTTP、JSON → `Snapshot` |
 | `sys.rs` | 419 | Win32 薄封装（窗口、进程、注册表、时间、DPR、内存） |
-| `tray.rs` | 160 | 托盘图标、提示条、右键菜单、气泡通知 |
-| `dev.rs` | 150 | 设计期命令：`--render`（离线出图走查） |
+| `tray.rs` | 177 | 托盘图标、提示条、右键菜单、气泡通知 |
+| `dev.rs` | 156 | 设计期命令：`--render`（离线出图走查） |
 | `config.rs` | 147 | `state.json` 读写 + `Mark` 类型 |
+| `mark.rs` | 143 | 产品标注解：三档位图怎么取、5h 余量到档位的阈值 |
 | `fmt.rs` | 113 | 百分比 / 时长 / 本地时间格式化 |
 | `main.rs` | 54 | 入口、单实例互斥、DPI、CLI |
-| `mark.rs` | 49 | 产品标位图：取最接近的一版、面积滤波缩放 |
 
 **建议的阅读顺序**：`poller.rs`（数据怎么变成 View）→ `ui.rs` 的 `paint_popover`（View 怎么变成像素）→ `app.rs` 的 `run()` 与三个 `wndproc`（它们怎么被串起来）→ `canvas.rs`（像素怎么算的）→ `api.rs`（数据从哪来）。
 
-**调试期本事**：`QuotaPin.exe --render <dir>` 用假数据把面板（亮/暗 × 5 种状态）、小窗、logo 渲染成 BMP，`scripts/bmp2png.py` 转 PNG。视觉改动能离线成图、可 diff、可进文档，不必真机上反复点。
+**调试期本事**：`QuotaPin.exe --render <dir>` 用假数据把面板（亮/暗 × 5 种状态）、小窗、三档 logo、各尺寸托盘图标渲染成 BMP，`scripts/bmp2png.py` 转 PNG。视觉改动能离线成图、可 diff、可进文档，不必真机上反复点。
 
 ---
 
@@ -110,7 +110,7 @@ main ─→ app ─→ ui ─→ canvas
 
 - **只用 Win32**，不引入任何 UI 框架。依赖只有 `windows-sys`（FFI 声明，不含逻辑）和 `serde_json`（解析 JSON）。
 - **界面全部自绘**：一个约 700 行的软件光栅器（`canvas.rs`）+ GDI 只负责把字栅格化。理由见 §9——`DrawText` 写不进 alpha 通道，而分层窗口必须要 alpha；所以文字走「拷进临时 DIB → GDI 就地压字 → 混合回写」，其余形状自己控像素。
-- **图标是位图，不是画出来的**：产品标由 `scripts/make_logo.py` 从一张源图烘焙成 `assets/mark.bin`（96px 主版 + 16/20px 收紧版）与 `assets/icon.ico`。运行时只是一次带面积滤波的缩放 + `CreateIconIndirect`，不引 WIC、不引 GDI+，托盘图标与 exe 图标同源。
+- **图标是位图，不是画出来的**：产品标由 `scripts/make_logo.py` 从一张横向三格的源图烘焙成 `assets/mark.bin`（三档 × 16/20/24/32/48，全部预乘）与 `assets/icon.ico`。运行时只是一次带面积滤波的缩放 + `CreateIconIndirect`，不引 WIC、不引 GDI+，托盘图标与 exe 图标同源。
 - **通知用托盘气泡**（`Shell_NotifyIcon` + `NIF_INFO`）：Win10/11 会把它渲染成标准 Toast 并进入通知中心，但不需要注册 AUMID、不需要快捷方式、不需要 WinRT——省掉一整套打包机制。
 - **不做安装模式**：单文件就是交付形态。开机自启只是 HKCU Run 下的一个键，右键菜单里勾一下就写，取消就删，比"安装"更透明也更好卸载。
 
@@ -125,11 +125,11 @@ quotapin/
 ├─ assets/
 │  ├─ app.rc             # 图标 + VERSIONINFO
 │  ├─ icon.ico           # 16~256 多尺寸，128/256 用 PNG 压缩；由 make_logo.py 生成
-│  ├─ mark.bin           # 标记位图（96 主版 + 16/20 收紧版），编译期 include_bytes! 进 exe
+│  ├─ mark.bin           # 三档沙漏 × 16/20/24/32/48，预乘位图，编译期 include_bytes! 进 exe
 │  └─ logo.png           # 256px 透明标，发布包里给用户看的那份
 ├─ scripts/
 │  ├─ build.ps1          # 构建 + 测试 + 打 zip
-│  ├─ make_logo.py       # 源图 → mark.bin / icon.ico / logo.png（用 ffmpeg 解码 PNG）
+│  ├─ make_logo.py       # 源图（横向三格）→ mark.bin / icon.ico / logo.png（用 ffmpeg 解码 PNG）
 │  ├─ bmp2png.py         # 设计走查：--render 产出的 BMP → PNG
 │  ├─ crop.py            # 设计走查：裁一块并最近邻放大，逐像素看
 │  └─ grab.py            # 设计走查：抓运行中窗口的像素（无需可见桌面）
@@ -322,13 +322,23 @@ poller 每拍检查，条件是三个都成立才触发：
 
 ## 7. 托盘状态设计
 
-托盘图标就是产品标（蓝色沙漏），不再随额度变色——原来自绘的两个半只为了在 16px 里塞进两个数字，换成正式图形后，再按档位染色会让图标在不同时刻看起来像不同的产品，16/24px 下更是糊成一团（试过在角落加告警圆点，直径占掉图标三分之一，也放弃了）。
+托盘图标就是产品标（蓝色沙漏），但它**跟着 5 小时余量换内容**：满沙漏 / 半空 / 见底。早前试过按档位染色，16px 下糊成一团，也不像同一个产品；试过在角落加告警圆点，直径占掉图标三分之一，只好放弃。现在的做法换的是**沙子位置**而不是颜色——图形始终是同一个沙漏，肉眼在 16px 下依然分得清上半个球是满的还是空的。
 
-信息改由这几处承载，各司其职：
+| 5h 剩余 | 托盘图标 | 源图 |
+| --- | --- | --- |
+| > 80% | 满沙漏（`variant 0`，**默认 logo**，也是 exe / 窗口图标） | 图 1（约 90%） |
+| 20–80% | 半空（`variant 1`） | 图 2（约 50%） |
+| ≤ 20% | 见底（`variant 2`） | 图 3（约 20%） |
+
+分界点定在 80 / 20，因为三张源图分别画在 ~90 / ~50 / ~20，落在这两个位置上图形依旧"说得准"；再往细里切就需要更多张图，而 16px 也承载不了。
+
+判定只看 **5h** 那一行（按 `limit_secs ≤ 6h` 找行，不按下标，接口以后多给几条额度也不会错位）。7d 变化太慢，用它换图标只会让人以为程序卡住了。
+
+信息由这几处承载，各司其职：
 
 | 元素 | 含义 |
 | --- | --- |
-| 托盘图标 | 产品标识；只表示"程序在跑" |
+| 托盘图标 | 产品标识 + 5h 余量的粗粒度读数（满 / 半 / 见底） |
 | 提示条 | `QuotaPin · 5h 80% · 7d 92% · 重置机会 3 次`；失败时追加 `· 更新失败` |
 | 左键 | 开合面板（面板里才用颜色表达档位） |
 | 右键 | 菜单（勾选态即当前配置） |
@@ -343,7 +353,9 @@ poller 每拍检查，条件是三个都成立才触发：
 | < 20 | `crit` | `#E04B4B` |
 | 未知/失败 | `neutral` | 亮色主题 `#B6BCC6`，暗色 `#555C67` |
 
-图标按 `GetSystemMetrics(SM_CXSMICON)`（通常 16 或 20，150% 缩放下 24）取尺寸，从 `mark.bin` 里挑最接近的一版做面积滤波缩放，再 `CreateDIBSection` + `CreateIconIndirect` 产出带 alpha 的 HICON。所以托盘图标只在启动时生成一次，没有句柄累积的问题。
+图标按 `GetSystemMetrics(SM_CXSMICON)`（通常 16 或 20，150% 缩放下 24）取尺寸，从 `mark.bin` 里挑**该档位**最接近的一版做面积滤波缩放，再 `CreateDIBSection` + `CreateIconIndirect` 产出带 alpha 的 HICON。换档由 `icon_key` 守卫：同一档位不会反复重建，`set_icon` 先 `NIM_MODIFY` 再 `DestroyIcon` 旧句柄，进程里始终只有一个图标，没有句柄累积。
+
+`mark.bin` 的容器是 `"QP2" | 档位数 | 尺寸数 | 尺寸表 | 位图…`：位图按档位分块，块内尺寸升序，每块 `size² × 4` 预乘 BGRA，最大的一版（48）兼任"未烘焙尺寸"的兜底（`--render` 的 128px 走查图就是这么来的）。`make_logo.py` 按源图宽高比切格（2172×724 → 三格 724），三格统一裁成同一个裁切框，所以换档时图标不会忽大忽小。`icon.ico` / `logo.png` 只取 `variant 0`。
 
 **面板贴边定位**：`Shell_NotifyIconGetRect` 拿图标矩形。注意它返回 `S_FALSE` 表示图标被收在「^」溢出区里——此时矩形依旧可用（指向溢出按钮旁），所以 `hr >= 0` 就采用，只有失败才退回光标位置。随后按工作区（`MonitorFromPoint` + `GetMonitorInfoW.rcWork`）夹取，任务栏在上方时自动翻到图标下方。
 
@@ -408,7 +420,7 @@ poller 每拍检查，条件是三个都成立才触发：
 | 面板行 | 无底色 | `hover` 底色圆角块（亮 `#F4F5F7` / 暗 `#24282E`） | 切换「剩余/已用」，数字与条同时切换，标签补 `· 已用` |
 | 面板底部 | 灰字 | 同上底色 | 同「切换」，方便误触时也有反馈 |
 | 小窗 | 92% 底 + 1px 边 | 底 +2~4% 提亮，边 +15% 提亮 | 拖动 / 弹面板 |
-| 托盘图标 | 双半颜色 | 系统 tooltip | 左键开合、右键菜单 |
+| 托盘图标 | 满 / 半 / 见底三档沙漏 | 系统 tooltip | 左键开合、右键菜单 |
 | 整块面板 | — | — | 点击外部失焦即收起（`WM_ACTIVATE` = `WA_INACTIVE`） |
 
 `clamped` 细节：点击托盘收起面板时会先触发失焦收起，再收到 `WM_LBUTTONUP`；用 `last_pop_hide` 时间戳在 260 ms 内吃掉这次"重复打开"，否则会出现"点一下关不掉"。
@@ -420,7 +432,7 @@ poller 每拍检查，条件是三个都成立才触发：
 ```
 Canvas（Vec<u32>，预乘 BGRA）
   ├─ round_rect / ring_round / shadow  → 圆角矩形 SDF，coverage = clamp(0.5-d, 0, 1)
-  ├─ image                             → 位图面积滤波缩放（产品标：96 → 16/20/24/32…）
+  ├─ image                             → 位图面积滤波缩放（三档产品标：16/20/24/32/48 已烘焙，其余尺寸落到最大一版）
   ├─ bar / circle                      → 组合上面的原语
   └─ text                              → 目标像素拷进临时 DIB → GDI 就地压字 → 逐通道混合回写
         ↓
@@ -478,16 +490,17 @@ pwsh -NoProfile -File scripts/build.ps1     # + dist/QuotaPin-0.1.0-win64.zip
 | `opt-level = "z"` + `lto = true` + `codegen-units = 1` | 代码段压到 ~250 KB |
 | `panic = "abort"` + `strip = true` | 去掉 unwind 表与符号 |
 | 零 UI 框架、零 TLS 库（用系统 WinHTTP） | 省掉 2–3 MB |
-| 图标以 DIB 形式内嵌 | 8 个尺寸共 313 KB（其中 256px 占 270 KB；若要更小可只保留 16/32/48/256） |
+| 图标以 DIB 形式内嵌 | 8 个尺寸共 94 KB（128/256 用 PNG 压缩），三档托盘标另占 53 KB |
 
 `build.rs` 会自己找 `rc.exe`：`QUOTAPIN_RC` 环境变量 → `PATH` → `C:\Program Files (x86)\Windows Kits\10\bin\*\x64\rc.exe`（取最高版本）。找不到时打一条 warning 继续编译，只是 exe 没有图标资源。
 
 ### 开发期命令
 
 ```powershell
-QuotaPin.exe --render <dir>   # 用假数据把面板(亮/暗 × 5 种状态)、小窗、logo 渲染成 BMP
+QuotaPin.exe --render <dir>   # 用假数据把面板(亮/暗 × 5 种状态)、小窗、三档 logo、各尺寸托盘标渲染成 BMP
 python scripts/make_logo.py <源图.png> <ffmpeg.exe>
-                              # 重新生成 assets/mark.bin / icon.ico / logo.png（换了标才要跑）
+                              # 源图是横向 N 格的沙漏（宽 = N × 高），重新生成
+                              # assets/mark.bin / icon.ico / logo.png（换了标才要跑）
 python scripts/bmp2png.py <dir>       # BMP → PNG（走查用，纯 stdlib）
 python scripts/grab.py <out.bmp>      # 抓运行中窗口的像素，不需要可见桌面
 python scripts/crop.py in.png out.png x y w h 6   # 裁一块并最近邻放大，逐像素看走查
@@ -501,15 +514,17 @@ python scripts/crop.py in.png out.png x y w h 6   # 裁一块并最近邻放大�
 
 ## 12. 测试
 
-`cargo test --release`，14 项，覆盖的都是"会静默出错"的纯逻辑：
+`cargo test --release`，18 项，覆盖的都是"会静默出错"的纯逻辑：
 
 | 模块 | 覆盖点 |
 | --- | --- |
 | `poller` | 档位边界（100/80/79.9/60/40/20/0）、首次静默、跨档只响一次、用尽告警、用量回落判定为重置、**低用量周期的重置仍被 `reset_at` 捕获**、平稳轮询不打扰、短标签映射 |
+| `mark` | 80/20 换档边界、`mark.bin` 容器完整（魔数 / 档位数 / 尺寸表 / 总长度）、每档每尺寸都能取到正确字节数 |
+| `ui` | 三档 × 16/20/24/32 都能真的产出 HICON（空句柄会让托盘悄悄沿用旧图） |
 | `api` | ISO8601 → unix（含闰日）、窗口秒数 → 中文标签、remaining 夹取 |
 | `fmt` | 百分比取整规则、时长单位选择、倒计时边界 |
 
-不测的部分：Win32 调用、绘制像素。前者靠运行时实测（见 §11 与 README 的资源占用表），后者靠 `--render` 出图人工走查。
+不测的部分：绘制像素。前者靠运行时实测（见 §11 与 README 的资源占用表），后者靠 `--render` 出图人工走查。
 
 ---
 
@@ -520,8 +535,9 @@ python scripts/crop.py in.png out.png x y w h 6   # 裁一块并最近邻放大�
 - **内部接口无契约**：`/backend-api/wham/*` 不是公开 API，改动时表现为 404，界面会显示原因但不会自动降级。
 - **小窗判定依赖进程名**：改名版需要手工配置 `extra_procs`；网页版 Codex 不会触发小窗（只看进程，不看标签页）。
 - **全屏应用不避让**：小窗是 `WS_EX_TOPMOST`，全屏游戏/视频时会盖在上面（可用「小窗常驻」关闭它）。
-- **托盘图标不带状态**：产品标是固定配色的位图（见 §7），余量档位只在提示条和面板里体现；想要一眼看出告警，需要另做一套小尺寸告警图标。
+- **托盘图标只有三档**：满 / 半 / 见底（见 §7），只回答"5h 大概还剩多少"；精确读数、7d 状态、取数失败都在提示条和面板里，图标不再细分——16px 放不下更多。
+- **换档不区分失败态**：取数失败时沿用最后一次成功的档位，只在提示条追加「更新失败」；否则图标会随着一次次重试跳来跳去。
 - **不处理多账号切换**：以 `auth.json` 当前内容为准，一个进程一份数据。
 - **重置判定的时间容差**：服务端把 `reset_at` 微调超过 120 s（例如后台重算了窗口起点）会被当成一次重置；实际很少见，代价是多一条通知而不是漏一条。
 
-可以考虑的后续：`additional_rate_limits` 的多行展示做完整（现在只取 primary window）、面板内一键打开 Codex、给托盘图标做一套低余量变体。
+可以考虑的后续：`additional_rate_limits` 的多行展示做完整（现在只取 primary window）、面板内一键打开 Codex、给三个档位做各自的 16px 手工像素稿（现在是面积滤波 + 调色板吸附）。

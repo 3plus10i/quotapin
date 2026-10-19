@@ -82,10 +82,11 @@ pub fn neutral_bar(light: bool) -> Rgba {
 // ---------------------------------------------------------------- icon
 
 /// Build the tray / window icon at the given pixel size.
-pub fn make_icon(px: i32) -> HICON {
+/// `variant` selects how empty the glass is (see `mark`); 0 is the full one.
+pub fn make_icon(px: i32, variant: usize) -> HICON {
     let px = px.max(8);
     let mut c = Canvas::new(px, px);
-    crate::mark::draw(&mut c, 0.0, 0.0, px as f32);
+    crate::mark::draw(&mut c, 0.0, 0.0, px as f32, variant);
     icon_from_canvas(&c)
 }
 
@@ -674,4 +675,25 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
     }
 
     c.blit(&card, s(MINI_SHADOW * 0.3) as i32, s(MINI_SHADOW * 0.3) as i32);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A null HICON makes the tray silently keep the old picture, so each
+    /// variant has to survive the real CreateDIBSection / CreateIconIndirect
+    /// path — not just the blit that feeds it.
+    #[test]
+    fn every_variant_becomes_a_real_icon() {
+        for v in 0..3 {
+            for px in [16, 20, 24, 32] {
+                let icon = make_icon(px, v);
+                assert!(!icon.is_null(), "variant {v} at {px}px was null");
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(icon);
+                }
+            }
+        }
+    }
 }

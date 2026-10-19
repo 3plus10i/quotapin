@@ -15,6 +15,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture
 
 use crate::canvas::{Canvas, Surface};
 use crate::config::Config;
+use crate::mark;
 use crate::poller::{self, SharedRef};
 use crate::sys;
 use crate::tray::{self, Tray};
@@ -72,6 +73,10 @@ pub struct App {
     mini_surface: Option<Surface>,
     drag: Option<Drag>,
     last_pop_hide: u64,
+    /// pixel size the tray icon was built at (SM_CXSMICON)
+    icon_px: i32,
+    /// which mark variant is on the tray right now
+    icon_key: u8,
 }
 
 impl App {
@@ -79,8 +84,8 @@ impl App {
         let scale = sys::dpi_for_window(msg) as f32 / 96.0;
         let theme = ui::theme(sys::apps_use_light_theme());
         let fonts = Fonts::new(scale);
-        let icon_size = unsafe { GetSystemMetrics(SM_CXSMICON) };
-        let icon = ui::make_icon(icon_size.max(16));
+        let icon_size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+        let icon = ui::make_icon(icon_size, mark::DEFAULT);
         let tray = Tray::add(msg, icon, "QuotaPin · 正在读取 Codex 余量");
         Self {
             pop,
@@ -99,6 +104,8 @@ impl App {
             mini_surface: None,
             drag: None,
             last_pop_hide: 0,
+            icon_px: icon_size,
+            icon_key: mark::DEFAULT as u8,
         }
     }
 
@@ -353,6 +360,14 @@ impl App {
             parts.push("更新失败".into());
         }
         self.tray.set_tip(&format!("{} · {}", APP_NAME, parts.join(" · ")));
+
+        // the mark follows the 5h quota: full glass → half → nearly empty
+        let key = icon_variant(&v);
+        if key != self.icon_key {
+            self.icon_key = key;
+            let icon = ui::make_icon(self.icon_px, key as usize);
+            self.tray.set_icon(icon);
+        }
     }
 
     fn drain_toasts(&mut self) {
@@ -440,8 +455,22 @@ impl App {
     }
 }
 
-// ------------------------------------------------------------------ procs
+/// The tray mark tracks the **5h** quota, not the 7d one: that is the window
+/// that actually moves during a session. The row is found by its length rather
+/// than its index, so extra limits in the response cannot confuse it.
+fn icon_variant(v: &View) -> u8 {
+    let short = v
+        .rows
+        .iter()
+        .find(|r| r.limit_secs > 0 && r.limit_secs <= 6 * 3600)
+        .or_else(|| v.rows.first());
+    match short {
+        Some(r) => mark::variant_for(r.remaining) as u8,
+        None => mark::DEFAULT as u8,
+    }
+}
 
+// ------------------------------------------------------------------ procs
 unsafe extern "system" fn wndproc_msg(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_DATA => {

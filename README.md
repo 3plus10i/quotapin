@@ -13,7 +13,7 @@
 
 ## 怎么用
 
-1. **双击 `QuotaPin.exe`** —— 托盘出现沙漏图标，从此常驻后台。
+1. **双击 `QuotaPin.exe`** —— 托盘出现沙漏图标，从此常驻后台。图标里的沙子跟着 **5 小时余量**往下漏：八成以上是满的，两成到八成空掉一半，跌破两成就快见底了。
 2. **左键单击图标** —— 弹出上面的面板；点面板外任意位置收起。
 3. **右键单击图标** —— 立即刷新 / 小窗常驻 / 开机自启 / 退出。
 
@@ -72,7 +72,7 @@ Codex 或 ChatGPT 窗口在前台时，桌面右下角会浮出一张两行的�
 
 ```powershell
 cargo build --release      # target/release/QuotaPin.exe
-cargo test --release       # 14 项逻辑测试
+cargo test --release       # 18 项逻辑测试
 ```
 
 ## 许可

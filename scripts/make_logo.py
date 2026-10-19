@@ -1,16 +1,18 @@
-"""Turn the source logo art into the assets QuotaPin ships.
+"""Turn the source logo sheet into the assets QuotaPin ships.
 
-The source is a 1254x1254 PNG; this script trims it to its ink, resamples it
-down with an area filter, and writes:
+The source is a horizontal sheet of hourglass marks, one per quota level — the
+glass emptier as you move right. The variant count comes from the aspect ratio
+(a 2172x724 sheet is three 724px cells). Each cell is trimmed to its own ink,
+resampled down with an area filter, and written as:
 
-    assets/mark.bin      96x96 premultiplied BGRA, embedded into the exe and
-                         resampled at runtime for every tray / window icon size
-    assets/icon.ico      16..256, low sizes as 32-bit DIB, 128/256 as PNG
-    assets/logo.png      256x256 RGBA, for docs and the release zip
+    assets/mark.bin      every variant at 16/20/24/32/48, premultiplied BGRA,
+                         embedded into the exe and picked by the tray at runtime
+    assets/icon.ico      16..256 of the first variant, the app icon
+    assets/logo.png      256x256 of the first variant, for docs and the release zip
 
 ffmpeg is only used as a PNG decoder. Pure stdlib otherwise.
 
-    python scripts/make_logo.py tmp/极简蓝色沙漏图标.png tmp/ffmpeg.exe
+    python scripts/make_logo.py tmp/三阶段绿色沙漏图标集.png tmp/ffmpeg.exe
 """
 import re
 import struct
@@ -20,17 +22,19 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MASTER = 96           # embedded size; divides evenly into 16/24/32/48
 FILL = 0.94           # content height as a fraction of the icon box
 
-# Sizes baked on top of the master, with the strength of a palette snap applied
-# after resampling. At 16-20px the art's four inks get averaged into mush by the
-# downscale; pulling each pixel back toward its nearest ink restores the crisp
-# frame that makes an hourglass readable at tray size.
+# Sizes baked for every variant. These are exactly what the shell asks for
+# (16/20/24 at 100-150% DPI, 32/48 above), so the tray never resamples.
+BAKED = [16, 20, 24, 32, 48]
+
+# Palette snap after resampling, at the sizes where the art's inks would
+# otherwise average into mush. 60% is enough to restore the frame's edge
+# without posterising the shading.
 SMALL = {16: 0.6, 20: 0.6}
 
-# The art's own inks, sampled from the source: glass, frame, sand, rim highlight.
-INKS = [(0xE9, 0xF6, 0xFC), (0x01, 0x2C, 0x60), (0x1B, 0xBD, 0xFC), (0x1E, 0x6F, 0xE0)]
+# The art's own inks, sampled from the source: glass, frame, sand, rim.
+INKS = [(0xE8, 0xF4, 0xFB), (0x01, 0x24, 0x51), (0x02, 0xC1, 0x5A), (0x01, 0x7A, 0xE6)]
 
 ICO_SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
 PNG_FROM = 128        # entries at or above this size are PNG-compressed
@@ -142,6 +146,46 @@ def snap_to_inks(rgba, strength):
     return out
 
 
+def cell_boxes(w, h, buf):
+    """Split a horizontal sheet into per-variant ink boxes.
+
+    The count comes from the aspect: a sheet that is an exact multiple of its
+    own height is N square cells. A single square image is just one cell.
+    """
+    n = w // h if h and w % h == 0 else 1
+    cell = w // n
+    boxes = [ink_box_in(w, h, buf, c * cell, (c + 1) * cell) for c in range(n)]
+    # give every variant the same crop size, centred on its own ink, so the
+    # three icons are the same size and do not jump when the tray swaps them
+    cw = max(b[2] - b[0] for b in boxes)
+    ch = max(b[3] - b[1] for b in boxes)
+    out = []
+    for x0, y0, x1, y1 in boxes:
+        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+        bx0 = min(max(cx - cw // 2, 0), w - cw)
+        by0 = min(max(cy - ch // 2, 0), h - ch)
+        out.append((bx0, by0, bx0 + cw, by0 + ch))
+    return out
+
+
+def ink_box_in(w, h, buf, xa, xb, thresh=8):
+    """Ink bounding box restricted to columns [xa, xb)."""
+    x0, y0, x1, y1 = xb, h, -1, -1
+    for y in range(h):
+        row = y * w * 4
+        for x in range(xa, xb):
+            if buf[row + x * 4 + 3] > thresh:
+                if x < x0:
+                    x0 = x
+                if x > x1:
+                    x1 = x
+                if y < y0:
+                    y0 = y
+                if y > y1:
+                    y1 = y
+    return x0, y0, x1 + 1, y1 + 1
+
+
 def fit_square(w, h, buf, box, size, fill=FILL):
     """Centre the ink in a square, keeping its aspect ratio."""
     x0, y0, x1, y1 = box
@@ -219,30 +263,35 @@ def premul_bgra(size, rgba):
 
 def main(src, ffmpeg):
     w, h, buf = decode(src, ffmpeg)
-    box = ink_box(w, h, buf)
-    print(f"source {w}x{h}, ink {box[2]-box[0]}x{box[3]-box[1]} at {box[:2]}")
+    boxes = cell_boxes(w, h, buf)
+    bw, bh = boxes[0][2] - boxes[0][0], boxes[0][3] - boxes[0][1]
+    print(f"source {w}x{h}, {len(boxes)} variant(s), ink {bw}x{bh}")
 
     assets = ROOT / "assets"
     assets.mkdir(exist_ok=True)
 
-    # mark.bin = "QP1" + count + sizes + premultiplied blobs (master last, so a
-    # size that was not baked falls back to it)
+    # mark.bin = "QP2" | variants | size count | sizes | premultiplied blobs,
+    # laid out variant by variant; within a variant the sizes ascend, and the
+    # last one doubles as the fallback for a size that was not baked.
     blobs = []
-    for size, strength in sorted(SMALL.items()):
-        art = snap_to_inks(fit_square(w, h, buf, box, size), strength)
-        blobs.append((size, premul_bgra(size, art)))
-    blobs.append((MASTER, premul_bgra(MASTER, fit_square(w, h, buf, box, MASTER))))
-    pack = b"QP1" + bytes([len(blobs)]) + bytes(s for s, _ in blobs)
-    pack += b"".join(b for _, b in blobs)
+    for box in boxes:
+        for size in BAKED:
+            art = fit_square(w, h, buf, box, size)
+            if size in SMALL:
+                art = snap_to_inks(art, SMALL[size])
+            blobs.append(premul_bgra(size, art))
+    pack = (b"QP2" + bytes([len(boxes), len(BAKED)]) + bytes(BAKED)
+            + b"".join(blobs))
     (assets / "mark.bin").write_bytes(pack)
-    print(f"mark.bin      {[s for s,_ in blobs]}  {len(pack)} B")
+    print(f"mark.bin      {len(boxes)}x{BAKED}  {len(pack)} B")
 
+    # the app icon is the first variant: the mark's resting state
+    first = boxes[0]
     entries = []
     for size in ICO_SIZES:
+        art = fit_square(w, h, buf, first, size)
         if size in SMALL:
-            art = snap_to_inks(fit_square(w, h, buf, box, size), SMALL[size])
-        else:
-            art = fit_square(w, h, buf, box, size)
+            art = snap_to_inks(art, SMALL[size])
         payload = png_bytes(size, size, art) if size >= PNG_FROM else dib_entry(size, size, art)
         entries.append((size, payload))
     ico = ico_bytes(entries)
@@ -250,7 +299,7 @@ def main(src, ffmpeg):
     sizes = " ".join(f"{s}:{len(p)//1024}K" for s, p in entries)
     print(f"icon.ico      {len(ico)//1024} KB total ({sizes})")
 
-    logo = fit_square(w, h, buf, box, 256)
+    logo = fit_square(w, h, buf, first, 256)
     (assets / "logo.png").write_bytes(png_bytes(256, 256, logo))
     print(f"logo.png      256x256  {(assets/'logo.png').stat().st_size//1024} KB")
 

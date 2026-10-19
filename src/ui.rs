@@ -26,6 +26,8 @@ pub struct Theme {
     pub border: Rgba,
     pub shadow: Rgba,
     pub mini_bg: Rgba,
+    /// Fill of the weekly bar: an identity colour, not a severity one.
+    pub day: Rgba,
 }
 
 pub fn theme(light: bool) -> Theme {
@@ -38,10 +40,15 @@ pub fn theme(light: bool) -> Theme {
             faint: Rgba::hex(0x9AA1AC),
             line: Rgba::hex(0xEDEFF2),
             hover: Rgba::hex(0xF4F5F7),
-            track: Rgba::hex(0xE8EAEE),
+            track: Rgba::hex(0xCFD5DD),
+            // cyan reads as "the other window" on white without competing with
+            // the green/amber/red the 5h bar uses for severity
+            day: Rgba::hex(0x1097B4),
             border: Rgba::hex(0xDADDE3).with_a(210),
             shadow: Rgba::rgb(20, 24, 32).with_a(44),
-            mini_bg: Rgba::hex(0xFBFCFD).with_a(238),
+            // opaque: a translucent card picks up the desktop behind it, and on
+            // a dark wallpaper the composite lands right on the track's grey
+            mini_bg: Rgba::hex(0xFBFCFD),
         }
     } else {
         Theme {
@@ -52,10 +59,13 @@ pub fn theme(light: bool) -> Theme {
             faint: Rgba::hex(0x6E7683),
             line: Rgba::hex(0x2B2F36),
             hover: Rgba::hex(0x24282E),
-            track: Rgba::hex(0x2E333A),
+            track: Rgba::hex(0x3A414B),
+            // lifted for the dark card, same hue family as the light theme
+            day: Rgba::hex(0x3FBED6),
             border: Rgba::hex(0x3A3F47).with_a(200),
             shadow: Rgba::rgb(0, 0, 0).with_a(90),
-            mini_bg: Rgba::hex(0x1E2228).with_a(236),
+            // opaque for the same reason as the light theme
+            mini_bg: Rgba::hex(0x1E2228),
         }
     }
 }
@@ -73,9 +83,24 @@ pub fn severity(remaining: f64) -> Rgba {
 
 pub fn neutral_bar(light: bool) -> Rgba {
     if light {
-        Rgba::hex(0xB6BCC6)
+        Rgba::hex(0x99A1AF)
     } else {
-        Rgba::hex(0x555C67)
+        Rgba::hex(0x737C8A)
+    }
+}
+
+/// The two bars answer different questions. The 5h bar's colour is its
+/// **severity** (green / amber / red); the 7d bar's colour is its **identity**
+/// (cyan), so the two rows are told apart by colour instead of by weight and
+/// the bar never looks like it changed meaning. Grey wins over both when the
+/// data is stale.
+fn bar_fill(t: &Theme, row: &RowView, dim: bool) -> Rgba {
+    if dim {
+        neutral_bar(t.light)
+    } else if row.limit_secs >= 86_400 {
+        t.day
+    } else {
+        severity(row.remaining)
     }
 }
 
@@ -249,31 +274,12 @@ const ROW_TOP: f32 = 41.0;
 const ROW_H: f32 = 56.0;
 const ROW_GAP: f32 = 10.0;
 const FOOTER_H: f32 = 30.0;
-/// The day window gets a twice-as-thick bar, so the two rows read apart at a
-/// glance without adding any label or divider.
-const BAR_THIN: f32 = 4.0;
-const BAR_THICK: f32 = 8.0;
-const MINI_BAR_THIN: f32 = 3.0;
-const MINI_BAR_THICK: f32 = 6.0;
+/// One thickness for every window. The two rows are told apart by their labels
+/// and reset lines; bar weight is not a channel we spend on that.
+const BAR_H: f32 = 4.0;
+const MINI_BAR_H: f32 = 3.0;
 const BAR_TOP: f32 = 25.0;
 const BOTTOM: f32 = 12.0;
-
-/// >= a day is the weekly window: thick bar. Hours stay thin.
-fn bar_height(limit_secs: i64) -> f32 {
-    if limit_secs >= 86_400 {
-        BAR_THICK
-    } else {
-        BAR_THIN
-    }
-}
-
-fn mini_bar_height(limit_secs: i64) -> f32 {
-    if limit_secs >= 86_400 {
-        MINI_BAR_THICK
-    } else {
-        MINI_BAR_THIN
-    }
-}
 
 fn card_h(rows: usize) -> f32 {
     let n = rows.max(1) as f32;
@@ -426,12 +432,6 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
                 t.hover,
             );
         }
-        let sev = if failing || v.stale() {
-            neutral_bar(t.light)
-        } else {
-            severity(row.remaining)
-        };
-
         let label = if v.show_used {
             format!("{} · 已用", row.label)
         } else {
@@ -472,15 +472,14 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
         } else {
             row.remaining / 100.0
         };
-        let bar_h = bar_height(row.limit_secs);
         card.bar(
             pad,
             y + s(BAR_TOP),
             w - pad * 2.0,
-            s(bar_h),
+            s(BAR_H),
             frac as f32,
             t.track,
-            sev,
+            bar_fill(t, row, failing || v.stale()),
         );
 
         let reset_line = if row.reset_at > 0 {
@@ -625,8 +624,8 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             Align::Left,
             t.muted,
         );
-        // thin for the 5h window, twice as thick for the weekly one
-        let bar_h = mini_bar_height(row.limit_secs);
+        // same thickness for both rows, matching the popover
+        let bar_h = MINI_BAR_H;
         let mid = y + s(6.0);
         card.bar(
             s(34.0),
@@ -635,7 +634,7 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             s(bar_h),
             (row.remaining / 100.0) as f32,
             t.track,
-            sev,
+            bar_fill(t, row, failing || v.stale()),
         );
         let txt = if v.show_used {
             fmt::pct(row.used)
@@ -695,5 +694,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn row(limit_secs: i64, remaining: f64) -> RowView {
+        RowView {
+            label: String::new(),
+            short: String::new(),
+            limit_secs,
+            used: 100.0 - remaining,
+            remaining,
+            reset_at: 0,
+        }
+    }
+
+    /// The weekly bar is an identity colour: it must not drift into the 5h
+    /// severity palette, and both bars go grey together when the data is stale.
+    #[test]
+    fn weekly_bar_keeps_its_own_colour() {
+        let t = theme(true);
+        assert_eq!(bar_fill(&t, &row(18_000, 90.0), false), severity(90.0));
+        assert_eq!(bar_fill(&t, &row(604_800, 90.0), false), t.day);
+        assert_eq!(bar_fill(&t, &row(604_800, 10.0), false), t.day);
+        assert_eq!(bar_fill(&t, &row(18_000, 10.0), false), severity(10.0));
+        assert_eq!(bar_fill(&t, &row(604_800, 90.0), true), neutral_bar(true));
+        assert_eq!(bar_fill(&theme(false), &row(604_800, 90.0), false), theme(false).day);
     }
 }

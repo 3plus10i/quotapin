@@ -21,7 +21,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA
 
 // ---------------------------------------------------------------- color
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgba {
     pub r: u8,
     pub g: u8,

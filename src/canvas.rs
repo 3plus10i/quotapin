@@ -252,56 +252,75 @@ impl Canvas {
         }
     }
 
-    /// Filled convex/concave polygon, 3x3 supersampled. Used for the hourglass.
-    pub fn polygon(&mut self, pts: &[(f32, f32)], c: Rgba) {
-        if pts.len() < 3 || c.a == 0 {
+    /// Blit a premultiplied RGBA image, squeezed into `size` x `size`.
+    ///
+    /// Source pixels are averaged by overlap rather than point-sampled: the
+    /// mark is embedded at 96px and drawn at 16, so a point sample would pick
+    /// one of every 36 pixels and thread the result with noise.
+    pub fn image(&mut self, raw: &[u8], sw: i32, sh: i32, x: f32, y: f32, size: f32) {
+        if sw <= 0 || sh <= 0 || raw.len() < (sw * sh * 4) as usize {
             return;
         }
-        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for &(x, y) in pts {
-            x0 = x0.min(x);
-            y0 = y0.min(y);
-            x1 = x1.max(x);
-            y1 = y1.max(y);
-        }
-        let ix0 = (x0.floor() as i32).max(0);
-        let iy0 = (y0.floor() as i32).max(0);
-        let ix1 = (x1.ceil() as i32).min(self.w);
-        let iy1 = (y1.ceil() as i32).min(self.h);
+        let dw = (size.round() as i32).max(1);
+        let dh = dw;
+        let (ox, oy) = (x.round() as i32, y.round() as i32);
+        let sx_step = sw as f32 / dw as f32;
+        let sy_step = sh as f32 / dh as f32;
 
-        const N: i32 = 3;
-        let inside = |px: f32, py: f32| -> bool {
-            let mut hit = false;
-            let mut j = pts.len() - 1;
-            for i in 0..pts.len() {
-                let (xi, yi) = pts[i];
-                let (xj, yj) = pts[j];
-                if (yi > py) != (yj > py)
-                    && px < (xj - xi) * (py - yi) / (yj - yi) + xi
-                {
-                    hit = !hit;
-                }
-                j = i;
-            }
-            hit
-        };
-
-        for y in iy0..iy1 {
-            for x in ix0..ix1 {
-                let mut samples = 0;
-                for sy in 0..N {
-                    for sx in 0..N {
-                        let px = x as f32 + (sx as f32 + 0.5) / N as f32;
-                        let py = y as f32 + (sy as f32 + 0.5) / N as f32;
-                        if inside(px, py) {
-                            samples += 1;
+        for dy in 0..dh {
+            let sy0 = dy as f32 * sy_step;
+            let sy1 = sy0 + sy_step;
+            for dx in 0..dw {
+                let sx0 = dx as f32 * sx_step;
+                let sx1 = sx0 + sx_step;
+                let (mut acc, mut wsum) = ([0.0f32; 4], 0.0f32);
+                for sy in (sy0 as i32)..(sy1.ceil() as i32).min(sh) {
+                    let wy = (sy1.min(sy as f32 + 1.0) - sy0.max(sy as f32)).max(0.0);
+                    if wy <= 0.0 {
+                        continue;
+                    }
+                    for sx in (sx0 as i32)..(sx1.ceil() as i32).min(sw) {
+                        let wx = (sx1.min(sx as f32 + 1.0) - sx0.max(sx as f32)).max(0.0);
+                        if wx <= 0.0 {
+                            continue;
                         }
+                        let w = wx * wy;
+                        let i = ((sy * sw + sx) * 4) as usize;
+                        for c in 0..4 {
+                            acc[c] += raw[i + c] as f32 * w;
+                        }
+                        wsum += w;
                     }
                 }
-                if samples > 0 {
-                    let cov = samples as f32 / (N * N) as f32;
-                    self.blend(x, y, c, c.a as f32 / 255.0 * cov);
+                if wsum <= 0.0 {
+                    continue;
                 }
+                let inv = 1.0 / wsum;
+                let a = acc[3] * inv;
+                if a < 0.5 {
+                    continue;
+                }
+                // raw is premultiplied BGRA, which is already the canvas layout
+                let px = ((a.round().clamp(0.0, 255.0) as u32) << 24)
+                    | (((acc[2] * inv).round().clamp(0.0, 255.0) as u32) << 16)
+                    | (((acc[1] * inv).round().clamp(0.0, 255.0) as u32) << 8)
+                    | ((acc[0] * inv).round().clamp(0.0, 255.0) as u32);
+                let (tx, ty) = (ox + dx, oy + dy);
+                if tx < 0 || ty < 0 || tx >= self.w || ty >= self.h {
+                    continue;
+                }
+                let idx = (ty * self.w + tx) as usize;
+                let d = self.px[idx];
+                let sa = (px >> 24) & 0xFF;
+                let inv_a = 255 - sa;
+                let r = ((px >> 16) & 0xFF) + ((d >> 16) & 0xFF) * inv_a / 255;
+                let g = ((px >> 8) & 0xFF) + ((d >> 8) & 0xFF) * inv_a / 255;
+                let b = (px & 0xFF) + (d & 0xFF) * inv_a / 255;
+                let al = sa + ((d >> 24) & 0xFF) * inv_a / 255;
+                self.px[idx] = (al.min(255) << 24)
+                    | (r.min(255) << 16)
+                    | (g.min(255) << 8)
+                    | b.min(255);
             }
         }
     }

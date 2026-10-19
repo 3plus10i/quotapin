@@ -79,94 +79,20 @@ pub fn neutral_bar(light: bool) -> Rgba {
     }
 }
 
-// ---------------------------------------------------------------- logo
+// ---------------------------------------------------------------- icon
 
-/// QuotaPin mark: an hourglass split in two halves.
-///
-/// Top half = the 5 hour window, bottom half = the 7 day window, so a single
-/// 16px tray icon can still carry two independent severities.
-///
-/// The walls are curved (vertical where they leave the rim, bending into the
-/// waist) and the rims are rounded pills, so the silhouette reads as a glass
-/// rather than two stacked triangles — which is what it is, at any size.
-pub fn draw_mark(c: &mut Canvas, x: f32, y: f32, size: f32, top: Rgba, bottom: Rgba) {
-    let s = size;
-    let cx = x + s * 0.5;
-    let mid = y + s * 0.5;
-    let hw = s * MARK_HW;
-    let nw = s * MARK_NW;
-    let r = s * MARK_R;
-    let h = s * MARK_H;
-
-    glass_half(c, cx, mid, h, hw, nw, r, true, top);
-    glass_half(c, cx, mid, h, hw, nw, r, false, bottom);
-}
-
-/// Mark proportions, in fractions of the icon size. Shared with `--svg` so the
-/// vector asset and the rasterised icon stay identical.
-pub const MARK_HW: f32 = 0.300; // glass half width at the rim
-pub const MARK_NW: f32 = 0.052; // half width at the waist
-pub const MARK_R: f32 = 0.105; // rim corner radius
-pub const MARK_H: f32 = 0.40; // rim to waist
-
-/// One half of the glass, as a closed outline: a rim with rounded corners,
-/// walls that bow slightly inward, and a short straight neck.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn glass_outline(
-    cx: f32,
-    mid: f32,
-    h: f32,
-    hw: f32,
-    nw: f32,
-    r: f32,
-    up: bool,
-) -> Vec<(f32, f32)> {
-    const N: usize = 20;
-    const TAPER: f32 = 0.90; // the rest of the span is a straight neck
-    let map = |dy: f32, x: f32| -> (f32, f32) {
-        (cx + x, if up { mid - h + dy } else { mid + h - dy })
-    };
-    let width = |dy: f32| -> f32 {
-        let u = (((dy - r) / (h - r)) / TAPER).clamp(0.0, 1.0);
-        nw + (hw - nw) * (1.0 - u).powf(0.75)
-    };
-    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(2 * N + 20);
-
-    // right wall: rim -> waist
-    for i in 0..=N {
-        let dy = r + (h - r) * (i as f32 / N as f32);
-        pts.push(map(dy, width(dy)));
-    }
-    // left wall: waist -> rim
-    for i in (0..=N).rev() {
-        let dy = r + (h - r) * (i as f32 / N as f32);
-        pts.push(map(dy, -width(dy)));
-    }
-    // left rim corner, then the rim itself, then the right corner
-    const A: usize = 6;
-    for k in 0..=A {
-        let th = std::f32::consts::FRAC_PI_2 * (1.0 - k as f32 / A as f32);
-        pts.push(map(r - r * th.cos(), -(hw - r) - r * th.sin()));
-    }
-    for k in 0..=A {
-        let th = std::f32::consts::FRAC_PI_2 * (k as f32 / A as f32);
-        pts.push(map(r - r * th.cos(), hw - r + r * th.sin()));
-    }
-    pts
-}
-
-fn glass_half(c: &mut Canvas, cx: f32, mid: f32, h: f32, hw: f32, nw: f32, r: f32, up: bool, col: Rgba) {
-    let pts = glass_outline(cx, mid, h, hw, nw, r, up);
-    c.polygon(&pts, col);
-}
-
-/// Build a tray icon at the given pixel size.
-pub fn make_icon(px: i32, c1: Rgba, c2: Rgba) -> HICON {
+/// Build the tray / window icon at the given pixel size.
+pub fn make_icon(px: i32) -> HICON {
     let px = px.max(8);
     let mut c = Canvas::new(px, px);
-    draw_mark(&mut c, 0.0, 0.0, px as f32, c1, c2);
-    let bgra = straight_bgra(&c);
+    crate::mark::draw(&mut c, 0.0, 0.0, px as f32);
+    icon_from_canvas(&c)
+}
 
+/// Wrap a square canvas as a 32-bit HICON (empty AND mask; alpha decides).
+pub fn icon_from_canvas(c: &Canvas) -> HICON {
+    let px = c.w.min(c.h).max(8);
+    let bgra = straight_bgra(c);
     unsafe {
         let mut bi: BITMAPINFO = std::mem::zeroed();
         bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;

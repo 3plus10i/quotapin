@@ -71,7 +71,6 @@ pub struct App {
     pop_surface: Option<Surface>,
     mini_surface: Option<Surface>,
     drag: Option<Drag>,
-    icon_key: (u8, u8),
     last_pop_hide: u64,
 }
 
@@ -81,11 +80,7 @@ impl App {
         let theme = ui::theme(sys::apps_use_light_theme());
         let fonts = Fonts::new(scale);
         let icon_size = unsafe { GetSystemMetrics(SM_CXSMICON) };
-        let icon = ui::make_icon(
-            icon_size.max(16),
-            ui::neutral_bar(theme.light),
-            ui::neutral_bar(theme.light).fade(0.6),
-        );
+        let icon = ui::make_icon(icon_size.max(16));
         let tray = Tray::add(msg, icon, "QuotaPin · 正在读取 Codex 余量");
         Self {
             pop,
@@ -103,7 +98,6 @@ impl App {
             pop_surface: None,
             mini_surface: None,
             drag: None,
-            icon_key: (255, 255),
             last_pop_hide: 0,
         }
     }
@@ -350,33 +344,6 @@ impl App {
 
     fn refresh_tray(&mut self) {
         let v = self.view();
-        let light = self.theme.light;
-        let color_of = |r: Option<f64>| -> (u8, u8, crate::canvas::Rgba) {
-            match r {
-                Some(rem) if !v.failing() && !v.stale() => {
-                    let sev = ui::severity(rem);
-                    let key = if rem >= 40.0 {
-                        2
-                    } else if rem >= 20.0 {
-                        1
-                    } else {
-                        0
-                    };
-                    (key, key, sev)
-                }
-                _ => (9, 9, ui::neutral_bar(light)),
-            }
-        };
-        let c1 = color_of(v.rows.first().map(|r| r.remaining));
-        let c2 = color_of(v.rows.get(1).map(|r| r.remaining));
-
-        if (c1.0 as u8, c2.1 as u8) != self.icon_key {
-            self.icon_key = (c1.0 as u8, c2.1 as u8);
-            let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
-            let icon = ui::make_icon(size, c1.2, c2.2);
-            self.tray.set_icon(icon);
-        }
-
         let mut parts: Vec<String> = Vec::new();
         for r in v.rows.iter().take(2) {
             parts.push(format!("{} {}", r.short, crate::fmt::pct(r.remaining)));

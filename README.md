@@ -2,7 +2,7 @@
 
 看 Codex 还剩多少额度的小工具：常驻托盘，一个图标 + 一个面板，显示 **5 小时额度**、**7 天额度**、**两者的重置时间**和**重置机会**。
 
-单文件 610 KB，双击即用，不需要安装，也不需要 .NET / WebView2。
+单文件 419 KB，双击即用，不需要安装，也不需要 .NET / WebView2。
 
 <p align="center">
   <img src="docs/images/popover-light.png" width="300" alt="面板（浅色）">

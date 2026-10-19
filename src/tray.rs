@@ -11,7 +11,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuItem, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW,
-    DestroyIcon, SetForegroundWindow, TrackPopupMenu, HICON, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN,
+    SetForegroundWindow, TrackPopupMenu, HICON, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
@@ -49,23 +49,6 @@ impl Tray {
             Shell_NotifyIconW(NIM_ADD, &nid);
         }
         Self { hwnd, icon }
-    }
-
-    pub fn set_icon(&mut self, icon: HICON) {
-        if icon.is_null() || icon == self.icon {
-            return;
-        }
-        let mut nid = base_data(self.hwnd);
-        nid.uFlags = NIF_ICON;
-        nid.hIcon = icon;
-        unsafe {
-            Shell_NotifyIconW(NIM_MODIFY, &nid);
-            // the shell already took the new icon, the old one is ours to free
-            if !self.icon.is_null() {
-                DestroyIcon(self.icon);
-            }
-        }
-        self.icon = icon;
     }
 
     pub fn set_tip(&self, tip: &str) {

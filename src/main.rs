@@ -11,6 +11,7 @@ mod canvas;
 mod config;
 mod dev;
 mod fmt;
+mod mark;
 mod poller;
 mod sys;
 mod tray;
@@ -30,25 +31,6 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        return;
-    }
-    if let Some(i) = args.iter().position(|a| a == "--icon") {
-        let path = args.get(i + 1).cloned().unwrap_or_else(|| "icon.ico".into());
-        dev::write_ico(
-            &path,
-            crate::canvas::Rgba::hex(0x2FA85B),
-            crate::canvas::Rgba::hex(0xC08A0E),
-        );
-        return;
-    }
-    if let Some(i) = args.iter().position(|a| a == "--svg") {
-        let tile = args.iter().any(|a| a == "--tile");
-        let path = args
-            .get(i + 1)
-            .filter(|a| !a.starts_with("--"))
-            .cloned()
-            .unwrap_or_else(|| "logo.svg".into());
-        dev::write_svg(&path, tile);
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--render") {

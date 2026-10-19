@@ -252,6 +252,60 @@ impl Canvas {
         }
     }
 
+    /// Filled convex/concave polygon, 3x3 supersampled. Used for the hourglass.
+    pub fn polygon(&mut self, pts: &[(f32, f32)], c: Rgba) {
+        if pts.len() < 3 || c.a == 0 {
+            return;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for &(x, y) in pts {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        let ix0 = (x0.floor() as i32).max(0);
+        let iy0 = (y0.floor() as i32).max(0);
+        let ix1 = (x1.ceil() as i32).min(self.w);
+        let iy1 = (y1.ceil() as i32).min(self.h);
+
+        const N: i32 = 3;
+        let inside = |px: f32, py: f32| -> bool {
+            let mut hit = false;
+            let mut j = pts.len() - 1;
+            for i in 0..pts.len() {
+                let (xi, yi) = pts[i];
+                let (xj, yj) = pts[j];
+                if (yi > py) != (yj > py)
+                    && px < (xj - xi) * (py - yi) / (yj - yi) + xi
+                {
+                    hit = !hit;
+                }
+                j = i;
+            }
+            hit
+        };
+
+        for y in iy0..iy1 {
+            for x in ix0..ix1 {
+                let mut samples = 0;
+                for sy in 0..N {
+                    for sx in 0..N {
+                        let px = x as f32 + (sx as f32 + 0.5) / N as f32;
+                        let py = y as f32 + (sy as f32 + 0.5) / N as f32;
+                        if inside(px, py) {
+                            samples += 1;
+                        }
+                    }
+                }
+                if samples > 0 {
+                    let cov = samples as f32 / (N * N) as f32;
+                    self.blend(x, y, c, c.a as f32 / 255.0 * cov);
+                }
+            }
+        }
+    }
+
     /// Soft drop shadow around a rounded rect.
     pub fn shadow(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32, spread: f32, c: Rgba) {
         let ix0 = ((x0 - spread).floor() as i32).max(0);
@@ -408,14 +462,24 @@ unsafe impl Send for Font {}
 
 impl Font {
     pub fn new(px: i32, weight: i32) -> Self {
-        let face = crate::sys::wide("Segoe UI");
+        // GDI matches weight *within* a family, and the "Segoe UI" family only
+        // ships Regular/Bold — a LOGFONT weight of 300 or 600 therefore snaps
+        // back to Regular or Bold. The lighter and semibold cuts live in their
+        // own families, so pick the face by name and keep lfWeight neutral.
+        let face = match weight {
+            w if w <= 350 => "Segoe UI Light",
+            w if w <= 450 => "Segoe UI",
+            w if w < 650 => "Segoe UI Semibold",
+            _ => "Segoe UI Bold",
+        };
+        let face = crate::sys::wide(face);
         let h = unsafe {
             CreateFontW(
                 -px,
                 0,
                 0,
                 0,
-                weight,
+                400,
                 0,
                 0,
                 0,

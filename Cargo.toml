@@ -3,7 +3,7 @@ name = "quotapin"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.77"
-description = "QuotaPin - a minimal Codex quota tray widget for Windows"
+description = "QuotaPin - 常驻托盘的 Codex 额度显示工具"
 license = "MIT"
 
 [[bin]]

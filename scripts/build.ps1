@@ -29,24 +29,6 @@ try {
     Copy-Item 'README.md' $stage
     Copy-Item 'assets/logo.svg' $stage
 
-    $installCmd = @'
-@echo off
-rem Per-user install: copies QuotaPin.exe to %LOCALAPPDATA%\QuotaPin,
-rem registers it to start with Windows, then launches it. No admin rights.
-setlocal
-if not exist "%~dp0QuotaPin.exe" (
-  echo QuotaPin.exe not found next to this script.
-  pause
-  exit /b 1
-)
-"%~dp0QuotaPin.exe" --install
-echo.
-echo Done. QuotaPin now lives in %LOCALAPPDATA%\QuotaPin and starts with Windows.
-echo Run "QuotaPin.exe --uninstall" in that folder to undo the autostart entry.
-pause
-'@
-    Set-Content -Path (Join-Path $stage 'install.cmd') -Value $installCmd -Encoding ascii
-
     $zip = Join-Path $dist "QuotaPin-$version-win64.zip"
     if (Test-Path $zip) { Remove-Item $zip -Force }
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip

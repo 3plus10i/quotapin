@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! QuotaPin — a minimal Codex quota tray widget for Windows.
+//! QuotaPin — Codex 额度托盘小工具。
+//!
+//! 单一可执行文件，无需安装：双击即常驻托盘，数据只来自 `%CODEX_HOME%/auth.json`
+//! 与两个官方接口。
 
 mod api;
 mod app;
@@ -26,18 +29,26 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--install") {
-        std::process::exit(app::install());
-    }
-    if args.iter().any(|a| a == "--uninstall") {
-        std::process::exit(app::uninstall());
-    }
     if args.iter().any(|a| a == "--version" || a == "-v") {
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--icon") {
         let path = args.get(i + 1).cloned().unwrap_or_else(|| "icon.ico".into());
-        dev::write_ico(&path, crate::canvas::Rgba::hex(0x2FA85B), crate::canvas::Rgba::hex(0x9AA1AC));
+        dev::write_ico(
+            &path,
+            crate::canvas::Rgba::hex(0x2FA85B),
+            crate::canvas::Rgba::hex(0xC08A0E),
+        );
+        return;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--svg") {
+        let tile = args.iter().any(|a| a == "--tile");
+        let path = args
+            .get(i + 1)
+            .filter(|a| !a.starts_with("--"))
+            .cloned()
+            .unwrap_or_else(|| "logo.svg".into());
+        dev::write_svg(&path, tile);
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--render") {

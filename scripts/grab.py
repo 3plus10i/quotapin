@@ -96,14 +96,18 @@ def grab(hwnd, path, out_w=None, out_h=None):
 def main():
     msg = u.FindWindowW("QuotaPin.Msg", None)
     pop = u.FindWindowW("QuotaPin.Popover", None)
-    print("msg hwnd =", msg, "popover hwnd =", pop)
+    mini = u.FindWindowW("QuotaPin.Mini", None)
+    print("msg hwnd =", msg, "popover hwnd =", pop, "mini hwnd =", mini)
     if not msg:
         return 1
+    out = sys.argv[1] if len(sys.argv) > 1 else "grab.bmp"
     if pop:
         u.PostMessageW(msg, WM_TRAY, 0, WM_LBUTTONUP)
         time.sleep(0.9)
         pop = u.FindWindowW("QuotaPin.Popover", None)
-        grab(pop, sys.argv[1] if len(sys.argv) > 1 else "grab.bmp")
+        grab(pop, out)
+    if mini and len(sys.argv) > 2:
+        grab(mini, sys.argv[2])
     return 0
 
 

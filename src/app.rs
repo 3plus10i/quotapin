@@ -724,37 +724,3 @@ pub fn run() -> i32 {
     a.save_cfg();
     0
 }
-
-/// `QuotaPin.exe --install`: copy next to %LOCALAPPDATA%, register autostart.
-pub fn install() -> i32 {
-    let Ok(exe) = std::env::current_exe() else {
-        return 1;
-    };
-    let target_dir = sys::env_path("LOCALAPPDATA")
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("QuotaPin");
-    let _ = std::fs::create_dir_all(&target_dir);
-    let target = target_dir.join("QuotaPin.exe");
-
-    let same = exe
-        .canonicalize()
-        .ok()
-        .map(|a| a == target.canonicalize().unwrap_or_default())
-        .unwrap_or(false);
-
-    if !same {
-        if std::fs::copy(&exe, &target).is_err() {
-            return 1;
-        }
-    }
-    sys::run_value_set(&target.to_string_lossy());
-    if !same {
-        let _ = std::process::Command::new(&target).spawn();
-    }
-    0
-}
-
-pub fn uninstall() -> i32 {
-    sys::run_value_delete();
-    0
-}

@@ -81,25 +81,83 @@ pub fn neutral_bar(light: bool) -> Rgba {
 
 // ---------------------------------------------------------------- logo
 
-/// Two bars of different height: "the 5h bar and the 7d bar".
-pub fn draw_logo(c: &mut Canvas, x: f32, y: f32, size: f32, c1: Rgba, c2: Rgba) {
-    let w = size * 0.24;
-    let gap = size * 0.12;
-    let total = w * 2.0 + gap;
-    let x0 = x + (size - total) * 0.5;
-    let base = y + size * 0.80;
-    let h1 = size * 0.62;
-    let h2 = size * 0.46;
-    let r = w * 0.5;
-    c.round_rect(x0, base - h1, x0 + w, base, r, c1);
-    c.round_rect(x0 + w + gap, base - h2, x0 + w + gap + w, base, r, c2);
+/// QuotaPin mark: an hourglass split in two halves.
+///
+/// Top half = the 5 hour window, bottom half = the 7 day window, so a single
+/// 16px tray icon can still carry two independent severities.
+///
+/// The walls are curved (vertical where they leave the rim, bending into the
+/// waist) and the rims are rounded pills, so the silhouette reads as a glass
+/// rather than two stacked triangles — which is what it is, at any size.
+pub fn draw_mark(c: &mut Canvas, x: f32, y: f32, size: f32, top: Rgba, bottom: Rgba) {
+    let s = size;
+    let cx = x + s * 0.5;
+    let mid = y + s * 0.5;
+    let hw = s * 0.300; // glass half width at the rim
+    let nw = s * 0.042; // half width at the waist
+    let r = s * 0.105; // rim corner radius
+    let h = s * 0.40; // rim to waist
+
+    glass_half(c, cx, mid, h, hw, nw, r, true, top);
+    glass_half(c, cx, mid, h, hw, nw, r, false, bottom);
+}
+
+/// One half of the glass, as a closed outline: a rim with rounded corners,
+/// walls that bow slightly inward, and a short straight neck.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn glass_outline(
+    cx: f32,
+    mid: f32,
+    h: f32,
+    hw: f32,
+    nw: f32,
+    r: f32,
+    up: bool,
+) -> Vec<(f32, f32)> {
+    const N: usize = 20;
+    const TAPER: f32 = 0.90; // the rest of the span is a straight neck
+    let map = |dy: f32, x: f32| -> (f32, f32) {
+        (cx + x, if up { mid - h + dy } else { mid + h - dy })
+    };
+    let width = |dy: f32| -> f32 {
+        let u = (((dy - r) / (h - r)) / TAPER).clamp(0.0, 1.0);
+        nw + (hw - nw) * (1.0 - u).powf(0.90)
+    };
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(2 * N + 20);
+
+    // right wall: rim -> waist
+    for i in 0..=N {
+        let dy = r + (h - r) * (i as f32 / N as f32);
+        pts.push(map(dy, width(dy)));
+    }
+    // left wall: waist -> rim
+    for i in (0..=N).rev() {
+        let dy = r + (h - r) * (i as f32 / N as f32);
+        pts.push(map(dy, -width(dy)));
+    }
+    // left rim corner, then the rim itself, then the right corner
+    const A: usize = 6;
+    for k in 0..=A {
+        let th = std::f32::consts::FRAC_PI_2 * (1.0 - k as f32 / A as f32);
+        pts.push(map(r - r * th.cos(), -(hw - r) - r * th.sin()));
+    }
+    for k in 0..=A {
+        let th = std::f32::consts::FRAC_PI_2 * (k as f32 / A as f32);
+        pts.push(map(r - r * th.cos(), hw - r + r * th.sin()));
+    }
+    pts
+}
+
+fn glass_half(c: &mut Canvas, cx: f32, mid: f32, h: f32, hw: f32, nw: f32, r: f32, up: bool, col: Rgba) {
+    let pts = glass_outline(cx, mid, h, hw, nw, r, up);
+    c.polygon(&pts, col);
 }
 
 /// Build a tray icon at the given pixel size.
 pub fn make_icon(px: i32, c1: Rgba, c2: Rgba) -> HICON {
     let px = px.max(8);
     let mut c = Canvas::new(px, px);
-    draw_logo(&mut c, 0.0, 0.0, px as f32, c1, c2);
+    draw_mark(&mut c, 0.0, 0.0, px as f32, c1, c2);
     let bgra = straight_bgra(&c);
 
     unsafe {
@@ -179,6 +237,7 @@ pub fn fit(font: &Font, s: &str, max_px: f32) -> String {
 pub struct RowView {
     pub label: String,
     pub short: String,
+    pub limit_secs: i64,
     pub used: f64,
     pub remaining: f64,
     pub reset_at: i64,
@@ -232,11 +291,11 @@ impl Fonts {
         Self {
             title: Font::new(px(12.0), 600),
             label: Font::new(px(11.5), 400),
-            value: Font::new(px(21.0), 600),
+            value: Font::new(px(21.0), 300),
             meta: Font::new(px(10.5), 400),
             strong: Font::new(px(11.5), 600),
-            mini_label: Font::new(px(9.0), 700),
-            mini_value: Font::new(px(10.5), 600),
+            mini_label: Font::new(px(9.0), 600),
+            mini_value: Font::new(px(12.0), 300),
         }
     }
 }
@@ -253,10 +312,34 @@ const PAD: f32 = 14.0;
 const HEADER_TOP: f32 = 13.0;
 const HEADER_H: f32 = 18.0;
 const ROW_TOP: f32 = 41.0;
-const ROW_H: f32 = 50.0;
+const ROW_H: f32 = 56.0;
 const ROW_GAP: f32 = 10.0;
 const FOOTER_H: f32 = 30.0;
+/// The day window gets a twice-as-thick bar, so the two rows read apart at a
+/// glance without adding any label or divider.
+const BAR_THIN: f32 = 4.0;
+const BAR_THICK: f32 = 8.0;
+const MINI_BAR_THIN: f32 = 3.0;
+const MINI_BAR_THICK: f32 = 6.0;
+const BAR_TOP: f32 = 25.0;
 const BOTTOM: f32 = 12.0;
+
+/// >= a day is the weekly window: thick bar. Hours stay thin.
+fn bar_height(limit_secs: i64) -> f32 {
+    if limit_secs >= 86_400 {
+        BAR_THICK
+    } else {
+        BAR_THIN
+    }
+}
+
+fn mini_bar_height(limit_secs: i64) -> f32 {
+    if limit_secs >= 86_400 {
+        MINI_BAR_THICK
+    } else {
+        MINI_BAR_THIN
+    }
+}
 
 fn card_h(rows: usize) -> f32 {
     let n = rows.max(1) as f32;
@@ -455,11 +538,12 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
         } else {
             row.remaining / 100.0
         };
+        let bar_h = bar_height(row.limit_secs);
         card.bar(
             pad,
-            y + s(26.0),
+            y + s(BAR_TOP),
             w - pad * 2.0,
-            s(5.0),
+            s(bar_h),
             frac as f32,
             t.track,
             sev,
@@ -478,7 +562,7 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             &f.meta,
             &reset_line,
             pad as i32,
-            (y + s(35.0)) as i32,
+            (y + s(ROW_H - 17.0)) as i32,
             (w - pad * 2.0) as i32,
             s(15.0) as i32,
             Align::Left,
@@ -591,7 +675,7 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
     let rows = &v.rows;
     for i in 0..2.min(rows.len()) {
         let row = &rows[i];
-        let y = if i == 0 { s(13.0) } else { s(30.0) };
+        let y = if i == 0 { s(11.0) } else { s(30.0) };
         let sev = if failing || v.stale() {
             neutral_bar(t.light)
         } else {
@@ -607,11 +691,14 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             Align::Left,
             t.muted,
         );
+        // thin for the 5h window, twice as thick for the weekly one
+        let bar_h = mini_bar_height(row.limit_secs);
+        let mid = y + s(6.0);
         card.bar(
             s(34.0),
-            y + s(3.0),
+            mid - s(bar_h) * 0.5,
             s(MINI_W - 34.0 - 46.0),
-            s(3.0),
+            s(bar_h),
             (row.remaining / 100.0) as f32,
             t.track,
             sev,

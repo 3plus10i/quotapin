@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="QuotaPin">
+  <title>QuotaPin</title>
+  <desc>Two quota bars on a shared baseline: the 5 hour window and the 7 day window.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23272E"/>
+      <stop offset="1" stop-color="#14171C"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#tile)"/>
+  <!-- 5h bar -->
+  <rect x="51" y="46" width="61" height="159" rx="30.5" fill="#2FA85B"/>
+  <!-- 7d bar: shorter, so the pair reads as a meter -->
+  <rect x="143" y="87" width="61" height="118" rx="30.5" fill="#8E96A3"/>
+</svg>

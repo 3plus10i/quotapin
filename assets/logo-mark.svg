@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="QuotaPin mark">
+  <title>QuotaPin mark</title>
+  <desc>Transparent variant used by the tray icon; the two bars are recoloured at
+  runtime to carry the 5 hour / 7 day severity.</desc>
+  <!-- left bar: 5h colour, right bar: 7d colour -->
+  <rect x="14.7" y="9" width="15" height="40" rx="7.5" fill="#2FA85B"/>
+  <rect x="34.4" y="19" width="15" height="30" rx="7.5" fill="#8E96A3"/>
+</svg>

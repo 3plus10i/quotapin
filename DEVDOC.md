@@ -43,10 +43,10 @@ GET chatgpt.com/backend-api/wham/rate-limit-reset-credits → 每个机会的 id
 
 **轮询与触发**：单 worker 线程，250 ms 心跳。取数间隔 `codex.exe`/`chatgpt.exe` 在跑 180 s、没跑 1800 s、失败 60 s 重试 3 次。前台探测约 1 Hz，只在状态翻转时 `PostMessage`。线程间只走 `Mutex<Shared>` + `PostMessage`，UI 线程从不碰网络。
 
-**通知状态机**：每个窗口记一个三元组 `Mark { bucket, used, reset_at }` 到 `state.json`。
+**通知状态机**：每个窗口记一个四元组 `Mark { bucket, used, reset_at, at }` 到 `state.json`。
 
 - `bucket = clamp(ceil(remaining/20), 0..5)`；档位**下降** → 「额度剩余 n%」；降到 0 → 「额度已用尽」+ 警告图标。
-- **重置判定不看档位**，看 `reset_at` 前移（或 `used` 断崖式回落 20 个点以上）——这是关键修正，理由见 §5.2。
+- **重置判定不看档位**，看 `reset_at` 是否**比时间走得更快**（前移量 > 经过时间 + 120 s），或 `used` 断崖式回落 20 个点以上——理由见 §6.2。
 - 储备重置机会：到期前 3 天内、当天 10:00 提醒一次，按 `id` 去重，一生成只响一次。
 - 首次观测一律静默记录，所以启动不会补发历史通知。
 
@@ -249,18 +249,20 @@ bucket(remaining) = clamp(ceil(remaining / 20), 0..5)      剩余 100 → 5
 
 `ceil` 而不是 `floor`，是因为「跌破 80%」这一刻的读数通常是 79.x，`ceil` 会把它归到 80 这一档，正好对应"跌破整 20% 节点"的语义。
 
-每个窗口在 `state.json.marks` 里记一个三元组，键为 `row.label`（如 `"5 小时"`）：
+每个窗口在 `state.json.marks` 里记一个四元组，键为 `row.label`（如 `"5 小时"`）：
 
 ```rust
-Mark { bucket: i32, used: f64, reset_at: i64 }
+Mark { bucket: i32, used: f64, reset_at: i64, at: i64 }
 ```
+
+`at` 是这一拍的时间。**没有它就无法区分"截止时间跳了"和"截止时间在随时间平移"**，见 §6.2。
 
 每拍按下面的顺序判定，**先判重置，再判档位**：
 
 | 条件 | 行为 |
 | --- | --- |
 | 没有历史记录 | **静默**记录。首次启动不补发历史通知 |
-| `reset_at` 前移 > 120 s，或 `used` 回落 ≥ 20 个点 | 发「额度已重置」 |
+| `reset_at` 前移量 > 经过时间 + 120 s，或 `used` 回落 ≥ 20 个点 | 发「额度已重置」 |
 | 否则 `bucket` 下降 | 发 `剩余 {bucket×20}%`；`bucket == 0` 改发「额度已用尽」+ 警告图标 |
 | 其余 | 无 |
 | 无论如何 | 把本次的 `Mark` 写回 |
@@ -274,18 +276,35 @@ Mark { bucket: i32, used: f64, reset_at: i64 }
 所以重置必须由**窗口自身的身份**判定，也就是接口给的 `reset_at`：窗口翻篇后它必然前移（滚动窗口 = 上一周期起点 + 窗口长度），与用掉多少额度无关。实际实现取两个信号：
 
 ```rust
-fn rolled_over(prev: &Mark, used: f64, reset_at: i64) -> bool {
-    if reset_at > 0 && prev.reset_at > 0 && reset_at > prev.reset_at + 120 { return true; }
-    used + 20.0 <= prev.used   // 兜底：reset_at 没动但用量断崖式回落
+const RESET_SLACK: i64 = 120;
+
+fn rolled_over(prev: &Mark, used: f64, reset_at: i64, now: i64) -> bool {
+    if reset_at > 0 && prev.reset_at > 0 && prev.at > 0 {
+        let elapsed = (now - prev.at).max(0);      // 这一拍离上一拍过了多久
+        if reset_at - prev.reset_at - elapsed > RESET_SLACK { return true; }
+    }
+    used + 20.0 <= prev.used                        // 兜底：reset_at 没动但用量断崖式回落
 }
 ```
 
-- 120 s 容差是为了吸收服务端时间戳的抖动，同时也避免把「重置时间被向上微调几分钟」误判成翻篇。
+**为什么必须减掉经过时间（v0.1.1 修的 bug）**：5h 窗口在**完全没用**的时候不会锚定，接口每次返回的都是 `reset_at = 现在 + 5 小时`（实测：`used_percent = 0`，`reset_at` 恰好是请求时刻 + 18000 s）。也就是说截止时间每一拍都**平移**一个轮询间隔：
+
+| 时刻 | `reset_at` | 与上一拍相比 |
+| --- | --- | --- |
+| 09:15 | 14:15 | — |
+| 09:18 | 14:18 | +180 s |
+| 09:21 | 14:21 | +180 s |
+
+老代码写的是 `reset_at > prev.reset_at + 120`，于是**每一拍都判定为"重置"**——3 分钟一条「5 小时额度已重置」，正文永远是"已用 0%"，重置时间一路往后爬。日志里那次刷屏就是这么来的。
+
+平移的位移等于经过时间，真翻篇的位移等于"旧窗口剩余 + 经过时间"（旧窗口到期后新窗口再加满一个周期），两者差着小时级。所以判据从"移动了多少"改成"**比时间走得更快多少**"。
+
+- 120 s 容差用来吸收服务端时间戳抖动（平移本身只差几秒）。
+- `prev.at == 0` 表示这份 `marks` 来自没有 `at` 的旧版本：这一拍跳过时间戳信号（只靠用量回落），并把 `at` 补上，下一拍起恢复正常。
 - 兜底分支处理 `reset_at` 缺失或不变、但用量明显回落的极端情况（例如用掉一次储备重置机会）。
 - 副作用是**一次重置只报一次**：翻篇后 `marks` 立刻更新成新的 `reset_at`，下一拍不再满足条件。
-- 用掉储备重置机会导致用量归零、但 `reset_at` 没变时，兜底分支同样会报「已重置」——语义上没错。
 
-单测 `reset_is_noticed_even_when_usage_never_reached_20_percent` 就锁这条：3% → 1% 的轻量周期，档位全程为 5，仍必须报重置。
+单测锁了三条：`reset_is_noticed_even_when_usage_never_reached_20_percent`（3% → 1% 的轻量周期，档位全程为 5，仍必须报重置）、`a_sliding_deadline_is_not_a_reset`（空转窗口连转 8 拍必须一条都不发，随后真翻篇仍要发）、`usage_dropping_means_the_window_rolled_over`（用量断崖兜底）。
 
 ### 6.3 储备重置机会到期
 
@@ -481,7 +500,7 @@ Canvas（Vec<u32>，预乘 BGRA）
 | `pinned` | bool | 「小窗常驻」 |
 | `muted` | bool | 「静默运行」：不发任何通知（见 §6.5）；旧文件没有这个键时按 `false` 处理 |
 | `show_used` | bool | 数字显示口径（剩余 / 已用），点击面板行切换 |
-| `marks` | `{窗口名: {bucket, used, reset_at}}` | 通知去重 + 重置判定的依据（见 §6.1） |
+| `marks` | `{窗口名: {bucket, used, reset_at, at}}` | 通知去重 + 重置判定的依据（见 §6.1） |
 | `warned_credits` | `[id]` | 已提醒过的重置机会 ID |
 | `expiry_day` | `"YYYY-MM-DD"` | 到期检查当天是否已执行 |
 | `extra_procs` | `[exe]` | 追加的前台进程名（小写） |
@@ -533,11 +552,11 @@ python scripts/crop.py in.png out.png x y w h 6   # 裁一块并最近邻放大�
 
 ## 12. 测试
 
-`cargo test --release`，21 项，覆盖的都是"会静默出错"的纯逻辑：
+`cargo test --release`，22 项，覆盖的都是"会静默出错"的纯逻辑：
 
 | 模块 | 覆盖点 |
 | --- | --- |
-| `poller` | 档位边界（100/80/79.9/60/40/20/0）、首次静默、跨档只响一次、用尽告警、用量回落判定为重置、**低用量周期的重置仍被 `reset_at` 捕获**、平稳轮询不打扰、短标签映射 |
+| `poller` | 档位边界（100/80/79.9/60/40/20/0）、首次静默、跨档只响一次、用尽告警、用量回落判定为重置、**低用量周期的重置仍被 `reset_at` 捕获**、**空转窗口的平移截止时间不算重置**、平稳轮询不打扰、短标签映射 |
 | `mark` | 80/20 换档边界、`mark.bin` 容器完整（魔数 / 档位数 / 尺寸表 / 总长度）、每档每尺寸都能取到正确字节数 |
 | `ui` | 三档 × 16/20/24/32 都能真的产出 HICON（空句柄会让托盘悄悄沿用旧图）；7 天条恒为青色、不随档位漂移，取数失败时两条一起转灰 |
 | `config` | `muted` 存得住、旧文件缺这个键时按 `false` 读；`marks` / `warned_credits` / `mini_pos` 往返不丢 |
@@ -558,6 +577,6 @@ python scripts/crop.py in.png out.png x y w h 6   # 裁一块并最近邻放大�
 - **托盘图标只有三档**：满 / 半 / 见底（见 §7），只回答"5h 大概还剩多少"；精确读数、7d 状态、取数失败都在提示条和面板里，图标不再细分——16px 放不下更多。
 - **换档不区分失败态**：取数失败时沿用最后一次成功的档位，只在提示条追加「更新失败」；否则图标会随着一次次重试跳来跳去。
 - **不处理多账号切换**：以 `auth.json` 当前内容为准，一个进程一份数据。
-- **重置判定的时间容差**：服务端把 `reset_at` 微调超过 120 s（例如后台重算了窗口起点）会被当成一次重置；实际很少见，代价是多一条通知而不是漏一条。
+- **空转窗口的截止时间是会动的**：5h 窗口在完全没用的时候，接口每次返回 `reset_at = 现在 + 5h`（见 §6.2），所以面板上的「重置 hh:mm」在不用的时候会一直往后滑，倒计时永远从 5 小时开始——这是服务端的语义，不是本程序的显示错误。真正开始消耗后它才固定下来。
 
 可以考虑的后续：`additional_rate_limits` 的多行展示做完整（现在只取 primary window）、面板内一键打开 Codex、给三个档位做各自的 16px 手工像素稿（现在是面积滤波 + 调色板吸附）。

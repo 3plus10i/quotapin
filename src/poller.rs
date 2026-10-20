@@ -91,15 +91,36 @@ fn bucket(remaining: f64) -> i32 {
     ((remaining / 20.0).ceil() as i32).clamp(0, 5)
 }
 
-/// A window rolled over if its reset timestamp jumped forward, or — as a
-/// fallback for servers that keep the stamp — if usage fell off a cliff.
+/// How much further than the elapsed time a deadline may move before it counts
+/// as a jump rather than a slide.
+const RESET_SLACK: i64 = 120;
+
+/// A window rolled over if its reset timestamp jumped forward by **more than the
+/// time that actually passed**, or — as a fallback for servers that keep the
+/// stamp — if usage fell off a cliff.
+///
+/// The comparison has to be against the clock. An unused 5h window keeps
+/// answering `reset_at = now + 5h`: the deadline slides forward by exactly the
+/// poll interval on every poll, so an absolute "moved more than 2 minutes" test
+/// fires every single time — that is the toast storm where "5 小时额度已重置"
+/// arrived every 3 minutes with 已用 0% and the reset time walking forward. A
+/// real rollover moves the deadline by the leftover of the old window *plus*
+/// the elapsed time, so it stands out by hours, not minutes.
+///
+/// `prev.at == 0` means the mark predates this check (older state.json); the
+/// timestamp signal is skipped for that one poll and the mark is rewritten with
+/// a stamp, so the next poll compares normally.
 ///
 /// This is deliberately independent of the bucket: a cycle that only burns 5%
 /// of the quota stays in bucket 5 the whole time, so bucket comparison alone
 /// would miss the reset entirely.
-fn rolled_over(prev: &Mark, used: f64, reset_at: i64) -> bool {
-    if reset_at > 0 && prev.reset_at > 0 && reset_at > prev.reset_at + 120 {
-        return true;
+fn rolled_over(prev: &Mark, used: f64, reset_at: i64, now: i64) -> bool {
+    if reset_at > 0 && prev.reset_at > 0 && prev.at > 0 {
+        let elapsed = (now - prev.at).max(0);
+        let shifted = reset_at - prev.reset_at;
+        if shifted - elapsed > RESET_SLACK {
+            return true;
+        }
     }
     used + 20.0 <= prev.used
 }
@@ -119,12 +140,12 @@ fn process_notifications(
             // first observation: record silently, never notify on launch
             cfg.marks.insert(
                 row.label.clone(),
-                Mark { bucket: b, used, reset_at },
+                Mark { bucket: b, used, reset_at, at: now },
             );
             continue;
         };
 
-        if rolled_over(&prev, used, reset_at) {
+        if rolled_over(&prev, used, reset_at, now) {
             toasts.push(Toast {
                 title: format!("{}额度已重置", row.label),
                 body: format!(
@@ -165,7 +186,7 @@ fn process_notifications(
 
         cfg.marks.insert(
             row.label.clone(),
-            Mark { bucket: b, used, reset_at },
+            Mark { bucket: b, used, reset_at, at: now },
         );
     }
 }
@@ -427,7 +448,8 @@ mod tests {
             Some(&Mark {
                 bucket: 4,
                 used: 20.0,
-                reset_at: 5_000
+                reset_at: 5_000,
+                at: 1_000
             })
         );
         assert_eq!(cfg.marks.get("7 天").map(|m| m.bucket), Some(5));
@@ -493,6 +515,42 @@ mod tests {
         assert!(toasts[0].title.contains("已重置"));
         assert_eq!(toasts[0].kind, 2);
         assert_eq!(cfg.marks.get("5 小时").map(|m| m.reset_at), Some(25_000));
+    }
+
+    /// Reported 2026-10-20: an unused 5h window answers `reset_at = now + 5h`,
+    /// so the deadline walks forward by one poll interval on every poll. That
+    /// used to pass the "moved more than 2 minutes" test, and the user got
+    /// 「5 小时额度已重置」every 3 minutes with 已用 0% and the reset time
+    /// sliding ahead by 3 minutes each time.
+    #[test]
+    fn a_sliding_deadline_is_not_a_reset() {
+        let mut cfg = Config::default();
+        let mut toasts = Vec::new();
+        let mut now = 1_000;
+        let week = 200_000;
+
+        process_notifications(&snap_r(0.0, 20.0, now + 18_000, week), &mut cfg, now, &mut toasts);
+        assert!(toasts.is_empty());
+
+        for _ in 0..8 {
+            now += 180; // one 3-minute poll
+            let reset = now + 18_000;
+            process_notifications(&snap_r(0.0, 20.0, reset, week), &mut cfg, now, &mut toasts);
+        }
+        assert!(toasts.is_empty(), "an idle window must stay silent");
+        assert_eq!(cfg.marks["5 小时"].at, now, "the mark keeps a fresh stamp");
+
+        // ...and a genuine rollover right after that still gets through: the
+        // old window ends now, the new one adds a full 5h on top of it.
+        now += 180;
+        process_notifications(
+            &snap_r(0.0, 20.0, now + 18_000 + 5_400, week),
+            &mut cfg,
+            now,
+            &mut toasts,
+        );
+        assert_eq!(toasts.len(), 1);
+        assert!(toasts[0].title.contains("已重置"));
     }
 
     #[test]

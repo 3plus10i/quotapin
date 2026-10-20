@@ -18,6 +18,11 @@ pub struct Mark {
     pub bucket: i32,
     pub used: f64,
     pub reset_at: i64,
+    /// when this mark was taken (unix seconds). Needed to tell a deadline that
+    /// jumps apart from one the server simply slides forward as time passes —
+    /// an idle 5h window keeps answering `reset_at = now + 5h`, so the two only
+    /// differ by *how far* it moved relative to the clock.
+    pub at: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +99,9 @@ impl Config {
                             bucket: b as i32,
                             used: val.get("used").and_then(|x| x.as_f64()).unwrap_or(0.0),
                             reset_at: val.get("reset_at").and_then(|x| x.as_i64()).unwrap_or(0),
+                            // absent in files from before the sliding-window fix;
+                            // 0 means "gap unknown", handled in poller::rolled_over
+                            at: val.get("at").and_then(|x| x.as_i64()).unwrap_or(0),
                         },
                     );
                 }
@@ -142,6 +150,7 @@ impl Config {
                         "bucket": m.bucket,
                         "used": m.used,
                         "reset_at": m.reset_at,
+                        "at": m.at,
                     }),
                 )
             })
@@ -186,6 +195,7 @@ mod tests {
                 bucket: 4,
                 used: 21.0,
                 reset_at: 1_792_414_440,
+                at: 1_792_414_000,
             },
         );
         c.warned_credits.push("abc".into());

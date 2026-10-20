@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn every_variant_becomes_a_real_icon() {
         for v in 0..3 {
-            for px in [16, 20, 24, 32] {
+            for px in [16, 20, 24, 32, 48] {
                 let icon = make_icon(px, v);
                 assert!(!icon.is_null(), "variant {v} at {px}px was null");
                 unsafe {

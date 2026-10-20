@@ -91,9 +91,16 @@ fn bucket(remaining: f64) -> i32 {
     ((remaining / 20.0).ceil() as i32).clamp(0, 5)
 }
 
-/// How much further than the elapsed time a deadline may move before it counts
-/// as a jump rather than a slide.
-const RESET_SLACK: i64 = 120;
+/// Slack allowed on top of the elapsed time, in seconds.
+///
+/// It has to satisfy two bounds, checked by `slack_fits_between_polls_and_window`:
+///
+/// - **slack < fastest poll interval** (60 s). Then one poll's worth of server
+///   jitter can never reach the threshold, and a sliding deadline (shift ==
+///   elapsed, by definition) can never be read as a jump.
+/// - **slowest poll interval < 5 h.** Otherwise a whole window could pass
+///   between two samples and a real rollover would look like a slide.
+const RESET_SLACK: i64 = 30;
 
 /// A window rolled over if its reset timestamp jumped forward by **more than the
 /// time that actually passed**, or — as a fallback for servers that keep the
@@ -551,6 +558,28 @@ mod tests {
         );
         assert_eq!(toasts.len(), 1);
         assert!(toasts[0].title.contains("已重置"));
+    }
+
+    /// The two bounds `RESET_SLACK` depends on. Both are properties of the
+    /// schedule, so they belong in a test: if someone shortens the idle cadence
+    /// below the slack, or raises the slack above the fastest retry, the
+    /// rollover test silently starts lying again.
+    #[test]
+    fn slack_fits_between_polls_and_window() {
+        assert!(
+            RESET_SLACK < RETRY_AFTER_ERROR,
+            "slack must stay under the fastest poll interval, or one poll of \
+             server jitter can reach the threshold"
+        );
+        assert!(
+            INTERVAL_IDLE < 18_000,
+            "the slowest poll must be well inside a 5h window, or a real \
+             rollover looks like a slide"
+        );
+        assert!(
+            INTERVAL_IDLE > RETRY_AFTER_ERROR && INTERVAL_ACTIVE > RETRY_AFTER_ERROR,
+            "a normal cadence must be slower than the error retry"
+        );
     }
 
     #[test]

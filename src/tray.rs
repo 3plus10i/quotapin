@@ -6,8 +6,8 @@ use std::ffi::c_void;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO,
-    NIIF_NONE, NIIF_USER, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    NOTIFYICONDATAW_0, NOTIFYICONIDENTIFIER,
+    NIIF_LARGE_ICON, NIIF_NONE, NIIF_USER, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW, NOTIFYICONDATAW_0, NOTIFYICONIDENTIFIER,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuItem, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
@@ -29,6 +29,16 @@ pub const MENU_MUTE: u32 = 5;
 pub struct Tray {
     pub hwnd: HWND,
     pub icon: HICON,
+    /// The same mark at large-icon size, for the toast's own artwork.
+    ///
+    /// The tray icon is built at `SM_CXSMICON` (16 px at 100 %, 24 at 150 %)
+    /// because that is the only size the notification area ever asks for. A
+    /// toast, however, paints its icon at roughly `SM_CXICON` — handing it the
+    /// 16 px bitmap and letting the shell stretch it is exactly the blur that
+    /// showed up in the reset balloons. Built once, never swapped: a custom
+    /// balloon is only ever used for a rollover, and a rollover always means a
+    /// full glass.
+    pub balloon: HICON,
 }
 
 fn base_data(hwnd: HWND) -> NOTIFYICONDATAW {
@@ -41,7 +51,7 @@ fn base_data(hwnd: HWND) -> NOTIFYICONDATAW {
 }
 
 impl Tray {
-    pub fn add(hwnd: HWND, icon: HICON, tip: &str) -> Self {
+    pub fn add(hwnd: HWND, icon: HICON, balloon: HICON, tip: &str) -> Self {
         let mut nid = base_data(hwnd);
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.hIcon = icon;
@@ -49,7 +59,7 @@ impl Tray {
         unsafe {
             Shell_NotifyIconW(NIM_ADD, &nid);
         }
-        Self { hwnd, icon }
+        Self { hwnd, icon, balloon }
     }
 
     pub fn set_tip(&self, tip: &str) {
@@ -61,9 +71,8 @@ impl Tray {
         }
     }
 
-    /// Swap the icon. The shell copies it on NIM_MODIFY, so the old one can go
-    /// straight away; `self.icon` always holds a live handle (it doubles as the
-    /// balloon's custom icon).
+    /// Swap the tray icon. The shell copies it on NIM_MODIFY, so the old one can
+    /// go straight away; `self.balloon` is a separate handle and is untouched.
     pub fn set_icon(&mut self, icon: HICON) {
         if icon.is_null() {
             return;
@@ -78,17 +87,21 @@ impl Tray {
         self.icon = icon;
     }
 
-    /// Balloon / toast. `kind`: 0 info, 1 warning, 2 custom(user) icon-less.
+    /// Balloon / toast. `kind`: 0 info, 1 warning, 2 custom (product mark).
+    ///
+    /// `NIIF_LARGE_ICON` tells the shell to paint `hBalloonIcon` at
+    /// `SM_CXICON` instead of the 16 px notification-area size, which is why
+    /// the balloon handle has to be a genuinely large bitmap.
     pub fn notify(&self, title: &str, body: &str, kind: u8) {
         let mut nid = base_data(self.hwnd);
         nid.uFlags = NIF_INFO;
         nid.dwInfoFlags = match kind {
             1 => NIIF_WARNING,
-            2 => NIIF_USER,
+            2 => NIIF_USER | NIIF_LARGE_ICON,
             _ => NIIF_INFO | NIIF_NONE,
         };
         if kind == 2 {
-            nid.hBalloonIcon = self.icon;
+            nid.hBalloonIcon = self.balloon;
         }
         nid.Anonymous = NOTIFYICONDATAW_0 { uTimeout: 8000 };
         sys::wide_into(&mut nid.szInfoTitle, title);
@@ -125,7 +138,11 @@ impl Tray {
         let nid = base_data(self.hwnd);
         unsafe {
             Shell_NotifyIconW(NIM_DELETE, &nid);
+            DestroyIcon(self.icon);
+            DestroyIcon(self.balloon);
         }
+        self.icon = std::ptr::null_mut();
+        self.balloon = std::ptr::null_mut();
     }
 }
 

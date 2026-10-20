@@ -86,7 +86,12 @@ impl App {
         let fonts = Fonts::new(scale);
         let icon_size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
         let icon = ui::make_icon(icon_size, mark::DEFAULT);
-        let tray = Tray::add(msg, icon, "QuotaPin · 正在读取 Codex 余量");
+        // A toast paints its icon at about SM_CXICON (32 dp), so give it the
+        // 32 dp bitmap — 48 px is the largest size baked into `mark.bin`, and
+        // never going below it keeps the fallback from stretching upwards.
+        let balloon_size = ((32.0 * scale).round() as i32).max(48);
+        let balloon = ui::make_icon(balloon_size, mark::DEFAULT);
+        let tray = Tray::add(msg, icon, balloon, "QuotaPin · 正在读取 Codex 余量");
         Self {
             pop,
             mini,

@@ -46,7 +46,7 @@ GET chatgpt.com/backend-api/wham/rate-limit-reset-credits → 每个机会的 id
 **通知状态机**：每个窗口记一个四元组 `Mark { bucket, used, reset_at, at }` 到 `state.json`。
 
 - `bucket = clamp(ceil(remaining/20), 0..5)`；档位**下降** → 「额度剩余 n%」；降到 0 → 「额度已用尽」+ 警告图标。
-- **重置判定不看档位**，看 `reset_at` 是否**比时间走得更快**（前移量 > 经过时间 + 120 s），或 `used` 断崖式回落 20 个点以上——理由见 §6.2。
+- **重置判定不看档位**，看 `reset_at` 是否**比时间走得更快**（前移量 > 经过时间 + 30 s），或 `used` 断崖式回落 20 个点以上——理由见 §6.2。
 - 储备重置机会：到期前 3 天内、当天 10:00 提醒一次，按 `id` 去重，一生成只响一次。
 - 首次观测一律静默记录，所以启动不会补发历史通知。
 
@@ -76,15 +76,15 @@ main ─→ app ─→ ui ─→ canvas
 
 | 文件 | 行 | 职责 |
 | --- | --- | --- |
-| `ui.rs` | 678 | 主题、托盘图标封装、面板 / 小窗绘制、命中测试、全部度量常量 |
-| `app.rs` | 722 | 三个窗口过程、显隐与定位、菜单、提示条与图标换档 |
+| `ui.rs` | 722 | 主题、托盘图标封装、面板 / 小窗绘制、命中测试、全部度量常量 |
+| `app.rs` | 744 | 三个窗口过程、显隐与定位、菜单、提示条与图标换档 |
 | `canvas.rs` | 768 | 软件光栅器、文字就地绘制、位图缩放、分层窗口 surface |
-| `poller.rs` | 515 | 轮询节奏、通知状态机、`Snapshot → View` 投影 |
+| `poller.rs` | 602 | 轮询节奏、通知状态机、`Snapshot → View` 投影 |
 | `api.rs` | 494 | 凭证读取、WinHTTP、JSON → `Snapshot` |
 | `sys.rs` | 419 | Win32 薄封装（窗口、进程、注册表、时间、DPR、内存） |
-| `tray.rs` | 177 | 托盘图标、提示条、右键菜单、气泡通知 |
+| `tray.rs` | 200 | 托盘图标、提示条、右键菜单、气泡通知（含 Toast 专用的大图标句柄） |
 | `dev.rs` | 156 | 设计期命令：`--render`（离线出图走查） |
-| `config.rs` | 147 | `state.json` 读写 + `Mark` 类型 |
+| `config.rs` | 209 | `state.json` 读写 + `Mark` 类型 |
 | `mark.rs` | 143 | 产品标注解：三档位图怎么取、5h 余量到档位的阈值 |
 | `fmt.rs` | 113 | 百分比 / 时长 / 本地时间格式化 |
 | `main.rs` | 54 | 入口、单实例互斥、DPI、CLI |
@@ -262,7 +262,7 @@ Mark { bucket: i32, used: f64, reset_at: i64, at: i64 }
 | 条件 | 行为 |
 | --- | --- |
 | 没有历史记录 | **静默**记录。首次启动不补发历史通知 |
-| `reset_at` 前移量 > 经过时间 + 120 s，或 `used` 回落 ≥ 20 个点 | 发「额度已重置」 |
+| `reset_at` 前移量 − 经过时间 > 30 s，或 `used` 回落 ≥ 20 个点 | 发「额度已重置」 |
 | 否则 `bucket` 下降 | 发 `剩余 {bucket×20}%`；`bucket == 0` 改发「额度已用尽」+ 警告图标 |
 | 其余 | 无 |
 | 无论如何 | 把本次的 `Mark` 写回 |
@@ -276,7 +276,7 @@ Mark { bucket: i32, used: f64, reset_at: i64, at: i64 }
 所以重置必须由**窗口自身的身份**判定，也就是接口给的 `reset_at`：窗口翻篇后它必然前移（滚动窗口 = 上一周期起点 + 窗口长度），与用掉多少额度无关。实际实现取两个信号：
 
 ```rust
-const RESET_SLACK: i64 = 120;
+const RESET_SLACK: i64 = 30;   // ε
 
 fn rolled_over(prev: &Mark, used: f64, reset_at: i64, now: i64) -> bool {
     if reset_at > 0 && prev.reset_at > 0 && prev.at > 0 {
@@ -299,12 +299,18 @@ fn rolled_over(prev: &Mark, used: f64, reset_at: i64, now: i64) -> bool {
 
 平移的位移等于经过时间，真翻篇的位移等于"旧窗口剩余 + 经过时间"（旧窗口到期后新窗口再加满一个周期），两者差着小时级。所以判据从"移动了多少"改成"**比时间走得更快多少**"。
 
-- 120 s 容差用来吸收服务端时间戳抖动（平移本身只差几秒）。
+**ε 只能卡在轮询间隔之间**：判据写成 `Δreset − Δt > ε`，ε 就是那个"多出来的位移"。它必须
+
+- **< 最快的轮询间隔**（当前 60 s，即出错重试）。否则一次轮询里的服务端抖动就能凑够 ε；而平移的位移恒等于 Δt、余量为 0，所以只要 ε 小于最短间隔，平移永远不可能被读成跳变。
+- **远小于一个窗口长度**（5h）：最慢的间隔是 `INTERVAL_IDLE = 1800 s`，占窗口的 1/10，真翻篇的位移是"旧窗口剩余 + Δt"，量级差着小时，不会和抖动混淆。
+
+取 30 s：比最短间隔 60 s 小一半，比扫描误差（±几秒）大一个数量级。两条边界由单测 `slack_fits_between_polls_and_window` 锁住——改 `RETRY_AFTER_ERROR` / `INTERVAL_IDLE` 时会立刻失败，不用等人肉回忆这条推理。
+
 - `prev.at == 0` 表示这份 `marks` 来自没有 `at` 的旧版本：这一拍跳过时间戳信号（只靠用量回落），并把 `at` 补上，下一拍起恢复正常。
 - 兜底分支处理 `reset_at` 缺失或不变、但用量明显回落的极端情况（例如用掉一次储备重置机会）。
 - 副作用是**一次重置只报一次**：翻篇后 `marks` 立刻更新成新的 `reset_at`，下一拍不再满足条件。
 
-单测锁了三条：`reset_is_noticed_even_when_usage_never_reached_20_percent`（3% → 1% 的轻量周期，档位全程为 5，仍必须报重置）、`a_sliding_deadline_is_not_a_reset`（空转窗口连转 8 拍必须一条都不发，随后真翻篇仍要发）、`usage_dropping_means_the_window_rolled_over`（用量断崖兜底）。
+单测锁了四条：`reset_is_noticed_even_when_usage_never_reached_20_percent`（3% → 1% 的轻量周期，档位全程为 5，仍必须报重置）、`a_sliding_deadline_is_not_a_reset`（空转窗口连转 8 拍必须一条都不发，随后真翻篇仍要发）、`usage_dropping_means_the_window_rolled_over`（用量断崖兜底）、`slack_fits_between_polls_and_window`（ε 与轮询间隔的大小关系）。
 
 ### 6.3 储备重置机会到期
 
@@ -324,7 +330,9 @@ poller 每拍检查，条件是三个都成立才触发：
 | --- | --- | --- |
 | 0 | 信息 | 剩余 80/60/40% |
 | 1 | 警告 | 剩余 20% / 用尽 / 机会到期 |
-| 2 | 应用图标 | 额度已重置 |
+| 2 | 应用图标（大尺寸，`NIIF_USER \| NIIF_LARGE_ICON`） | 额度已重置 |
+
+**Toast 的图标不走托盘那一份**：托盘图标按 `SM_CXSMICON` 取尺寸，只有 16 / 20 / 24 px，而 Toast 左侧是按 32 dp 画的，把那张小位图拉伸上去就是"糊"的来源。所以 `Tray` 里另存一个 `balloon` 句柄：开机时按 `max(48, 32 dp)` 从 `mark.bin` 生成一次（48 是烘焙好的最大尺寸，不会再被拉伸），并配 `NIIF_LARGE_ICON` 让 shell 按大图标绘制。它只在 kind == 2 时被用到，而 kind == 2 恒为"刚翻篇"（满杯，variant 0），所以不需要跟着托盘换档。
 
 文案模板（`·` 分隔，不换行；`fmt::pct` 自带 `%`，格式串里不要再写一次）：
 
@@ -383,7 +391,7 @@ poller 每拍检查，条件是三个都成立才触发：
 | 未知/失败 | `neutral` | 亮色主题 `#99A1AF`，暗色 `#737C8A` |
 | 7 天条（恒定） | `day` | 亮 `#1097B4`，暗 `#3FBED6` |
 
-图标按 `GetSystemMetrics(SM_CXSMICON)`（通常 16 或 20，150% 缩放下 24）取尺寸，从 `mark.bin` 里挑**该档位**最接近的一版做面积滤波缩放，再 `CreateDIBSection` + `CreateIconIndirect` 产出带 alpha 的 HICON。换档由 `icon_key` 守卫：同一档位不会反复重建，`set_icon` 先 `NIM_MODIFY` 再 `DestroyIcon` 旧句柄，进程里始终只有一个图标，没有句柄累积。
+图标按 `GetSystemMetrics(SM_CXSMICON)`（通常 16 或 20，150% 缩放下 24）取尺寸，从 `mark.bin` 里挑**该档位**最接近的一版做面积滤波缩放，再 `CreateDIBSection` + `CreateIconIndirect` 产出带 alpha 的 HICON。换档由 `icon_key` 守卫：同一档位不会反复重建，`set_icon` 先 `NIM_MODIFY` 再 `DestroyIcon` 旧句柄，所以进程里稳定只有两个图标句柄——托盘那份随档位换，Toast 那份（`balloon`，48 px，见 §6.4）建一次就不动——不会累积。退出时 `remove` 把两个都销毁。
 
 `mark.bin` 的容器是 `"QP2" | 档位数 | 尺寸数 | 尺寸表 | 位图…`：位图按档位分块，块内尺寸升序，每块 `size² × 4` 预乘 BGRA，最大的一版（48）兼任"未烘焙尺寸"的兜底（`--render` 的 128px 走查图就是这么来的）。`make_logo.py` 按源图宽高比切格（2172×724 → 三格 724），三格统一裁成同一个裁切框，所以换档时图标不会忽大忽小。`icon.ico` / `logo.png` 只取 `variant 0`。
 
@@ -552,13 +560,13 @@ python scripts/crop.py in.png out.png x y w h 6   # 裁一块并最近邻放大�
 
 ## 12. 测试
 
-`cargo test --release`，22 项，覆盖的都是"会静默出错"的纯逻辑：
+`cargo test --release`，23 项，覆盖的都是"会静默出错"的纯逻辑：
 
 | 模块 | 覆盖点 |
 | --- | --- |
-| `poller` | 档位边界（100/80/79.9/60/40/20/0）、首次静默、跨档只响一次、用尽告警、用量回落判定为重置、**低用量周期的重置仍被 `reset_at` 捕获**、**空转窗口的平移截止时间不算重置**、平稳轮询不打扰、短标签映射 |
+| `poller` | 档位边界（100/80/79.9/60/40/20/0）、首次静默、跨档只响一次、用尽告警、用量回落判定为重置、**低用量周期的重置仍被 `reset_at` 捕获**、**空转窗口的平移截止时间不算重置**、**ε 与轮询间隔的大小关系**、平稳轮询不打扰、短标签映射 |
 | `mark` | 80/20 换档边界、`mark.bin` 容器完整（魔数 / 档位数 / 尺寸表 / 总长度）、每档每尺寸都能取到正确字节数 |
-| `ui` | 三档 × 16/20/24/32 都能真的产出 HICON（空句柄会让托盘悄悄沿用旧图）；7 天条恒为青色、不随档位漂移，取数失败时两条一起转灰 |
+| `ui` | 三档 × 16/20/24/32/48 都能真的产出 HICON（空句柄会让托盘悄悄沿用旧图）；7 天条恒为青色、不随档位漂移，取数失败时两条一起转灰 |
 | `config` | `muted` 存得住、旧文件缺这个键时按 `false` 读；`marks` / `warned_credits` / `mini_pos` 往返不丢 |
 | `api` | ISO8601 → unix（含闰日）、窗口秒数 → 中文标签、remaining 夹取 |
 | `fmt` | 百分比取整规则、时长单位选择、倒计时边界 |

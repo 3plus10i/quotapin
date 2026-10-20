@@ -341,32 +341,69 @@ pub enum Hover {
 
 // ---------------------------------------------------------------- popover
 
-/// Shown instead of a timestamp while the 5h window sits unused.
+/// Shown on the 5 小时 row instead of a timestamp while the window waits to be
+/// opened.
 pub const READY_LINE: &str = "重置 已就绪，等待开始使用";
 
-/// How far below a whole window the measured difference may fall and still
-/// count as "not started". The API only re-anchors an unused window when it is
-/// asked, while `View::now` moves on every repaint, so the gap drifts down by
-/// up to one poll interval plus a couple of repaints between fetches.
-const NOT_STARTED_SLACK: i64 = 300;
+/// 时间比较的容差：±2 分钟。
+///
+/// 两处噪声决定了它不能更小：重置 / 到期时间只精确到分钟，往返一次查询最多
+/// 还要 1 分钟（`api::TIMEOUT`），所以两个时间戳相减的误差可达 ±1 分钟以上。
+/// 取 2 分钟就够把两者都吸收掉。
+///
+/// 它有两个使用者，两个都在下面被测试钉住（`TIME_TOL` 必须
+/// `60 < TIME_TOL < INTERVAL_ACTIVE`）：
+///
+/// - 判断周期状态（`cycle_state`）：`|R − t|` 与窗口长度相比，容差之内算"还没开始"。
+/// - 判断周期翻篇（`poller::rolled_over`）：剩余时长变长了 `TIME_TOL` 以上才算。
+///
+/// 上限的理由：容差必须小于最短的**正常**取数间隔（`INTERVAL_ACTIVE = 180 s`），
+/// 否则"一次查询窗口内容许的抖动"就大到和一整个轮询周期分不清。
+pub const TIME_TOL: i64 = 120;
 
-/// Has the 5h window been opened at all?
+/// What a quota window is doing right now — derived only from one successful
+/// sample, never from the render clock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cycle {
+    /// 就绪等待中: untouched and a whole window away from its deadline.
+    Ready,
+    /// 使用中: started (including "used up, waiting for the deadline").
+    Running,
+    /// 状态不确定: no timestamp, stale clock, or a deadline in the past.
+    Unknown,
+}
+
+/// Classify one window from one sample. `at` is the **fetch** timestamp of that
+/// sample (`View::at`), not the paint time: the server anchors an unused window
+/// to *its* clock at request time, so the invariant `R = query + H` can only be
+/// checked against the moment the data was read.
 ///
-/// An unused window is answered as `reset_at = now + 5h` on *every* request
-/// (DEVDOC §6.2), so it looks freshly allocated forever: 100 % left and a
-/// deadline exactly one window away. Printing `重置 13:01 · 2 小时 46 分后` for
-/// it implies a countdown that is not running, hence the plain sentence.
+/// The three rows are the decision table from DEVDOC §6.7:
 ///
-/// Load-bearing details: only the 5 小时 row (`limit_secs == 5h`), and the
-/// remaining check is `>= 99.5` so it fires exactly when the big number rounds
-/// to 100 %. Once the window is really used the deadline stops sliding and this
-/// drops out within minutes.
-fn not_started(row: &RowView, now: i64) -> bool {
-    const FIVE_HOURS: i64 = 5 * 3600;
-    row.limit_secs == FIVE_HOURS
-        && row.reset_at > 0
-        && row.remaining >= 99.5
-        && row.reset_at - now >= FIVE_HOURS - NOT_STARTED_SLACK
+/// | condition | state |
+/// | --- | --- |
+/// | `p ≈ 100 %` and `|R − at − H| ≤ TIME_TOL` | Ready |
+/// | `at < R < at + H − TIME_TOL` | Running |
+/// | anything else | Unknown |
+///
+/// `p ≈ 100 %` is spelled `>= 99.5` so the state flips exactly where the big
+/// number stops printing 100 %. A window that really started but burnt nothing
+/// measurable is drawn as Running as soon as its deadline stops being a whole
+/// window away — that is the one ambiguity the model accepts (a later sample
+/// corrects it).
+pub fn cycle_state(row: &RowView, at: i64) -> Cycle {
+    let h = row.limit_secs;
+    if h <= 0 || row.reset_at <= 0 || at <= 0 {
+        return Cycle::Unknown;
+    }
+    let left = row.reset_at - at; // 这一拍离重置还有多久
+    if (left - h).abs() <= TIME_TOL && row.remaining >= 99.5 {
+        Cycle::Ready
+    } else if left > 0 && left < h - TIME_TOL {
+        Cycle::Running
+    } else {
+        Cycle::Unknown
+    }
 }
 
 pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f32, f: &Fonts) {
@@ -510,7 +547,8 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             bar_fill(t, row, failing || v.stale()),
         );
 
-        let reset_line = if not_started(row, v.now) {
+        // 只有 5 小时那一行改口径（7 天那一行仍按原样显示时间戳）。
+        let reset_line = if row.limit_secs == 18_000 && cycle_state(row, v.at) == Cycle::Ready {
             READY_LINE.to_string()
         } else if row.reset_at > 0 {
             format!(
@@ -750,42 +788,68 @@ mod tests {
         assert_eq!(&bar_fill(&theme(false), &row(604_800, 90.0), false), &theme(false).day);
     }
 
-    /// The 5h row is "ready" only while the window is both untouched and a full
-    /// window away. Both halves matter: an untouched window whose deadline has
-    /// already started sliding is about to be used, and a used window can still
-    /// read 100 % for the first moments.
+    /// The decision table from DEVDOC §6.7, exercised on one sample at a time.
     #[test]
-    fn an_untouched_5h_window_reads_ready() {
+    fn cycle_state_follows_the_decision_table() {
+        let at = 10_000;
+        let five = 18_000;
+
+        // untouched and exactly one window away
+        let mut r = row(five, 100.0);
+        r.reset_at = at + five;
+        assert_eq!(cycle_state(&r, at), Cycle::Ready);
+
+        // ±2 min of stamp/query noise must not flip it
+        r.reset_at = at + five - 90;
+        assert_eq!(cycle_state(&r, at), Cycle::Ready);
+
+        // the deadline is no longer a whole window away -> the cycle started,
+        // even though nothing has been consumed yet
+        r.reset_at = at + five - 200;
+        assert_eq!(cycle_state(&r, at), Cycle::Running);
+
+        // draining
+        r.reset_at = at + 9_000;
+        assert_eq!(cycle_state(&r, at), Cycle::Running);
+
+        // used up, waiting for the deadline: still "running" by definition
+        let mut spent = row(five, 0.0);
+        spent.reset_at = at + 600;
+        assert_eq!(cycle_state(&spent, at), Cycle::Running);
+
+        // 100 % but the stamp is in the past: unknown, never "ready"
+        let mut past = row(five, 100.0);
+        past.reset_at = at - 1;
+        assert_eq!(cycle_state(&past, at), Cycle::Unknown);
+
+        // no stamp at all (old state file / first fetch)
+        let mut none = row(five, 100.0);
+        none.reset_at = 0;
+        assert_eq!(cycle_state(&none, at), Cycle::Unknown);
+
+        // 0.6 % consumed: the one ambiguity the model accepts, so neither ready
+        // nor running — the next sample settles it
+        let mut barely = row(five, 99.4);
+        barely.reset_at = at + five;
+        assert_eq!(cycle_state(&barely, at), Cycle::Unknown);
+
+        // the classifier is window-agnostic; the 7d row answers the same way
+        let mut week = row(604_800, 100.0);
+        week.reset_at = at + 604_800;
+        assert_eq!(cycle_state(&week, at), Cycle::Ready);
+    }
+
+    /// Why the sample's own timestamp and not the paint clock. `at` is fixed at
+    /// fetch time, so an untouched window keeps reading Ready however long the
+    /// panel stays open; dated by `now`, the very same row would decay into
+    /// "running" an hour later — a timer artefact, not anything the server did.
+    #[test]
+    fn readiness_is_dated_by_the_fetch_not_the_paint() {
+        let fetched_at = 10_000;
         let mut r = row(18_000, 100.0);
-        r.reset_at = 10_000 + 18_000;
-        assert!(not_started(&r, 10_000));
-        assert!(
-            not_started(&r, 10_000 + 240),
-            "the deadline only slides on a fetch; a repaint must not flip it back"
-        );
-        assert!(
-            !not_started(&r, 10_000 + 400),
-            "a running window keeps its timestamp"
-        );
+        r.reset_at = fetched_at + 18_000;
 
-        // 99.6 % still prints as 100 %, so it still reads as ready
-        let mut nearly = row(18_000, 99.6);
-        nearly.reset_at = 10_000 + 18_000;
-        assert!(not_started(&nearly, 10_000));
-
-        // ...but anything visibly consumed is not
-        let mut used = row(18_000, 80.0);
-        used.reset_at = 10_000 + 18_000;
-        assert!(!not_started(&used, 10_000));
-
-        // the weekly row never claims to be waiting to start
-        let mut w = row(604_800, 100.0);
-        w.reset_at = 10_000 + 604_800;
-        assert!(!not_started(&w, 10_000));
-
-        // no timestamp at all: fall back to the unknown path
-        let mut unknown = row(18_000, 100.0);
-        unknown.reset_at = 0;
-        assert!(!not_started(&unknown, 10_000));
+        assert_eq!(cycle_state(&r, fetched_at), Cycle::Ready);
+        assert_eq!(cycle_state(&r, fetched_at + 3_600), Cycle::Running);
     }
 }

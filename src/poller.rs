@@ -93,34 +93,36 @@ fn bucket(remaining: f64) -> i32 {
 
 /// Slack allowed on top of the elapsed time, in seconds.
 ///
-/// It has to satisfy two bounds, checked by `slack_fits_between_polls_and_window`:
-///
-/// - **slack < fastest poll interval** (60 s). Then one poll's worth of server
-///   jitter can never reach the threshold, and a sliding deadline (shift ==
-///   elapsed, by definition) can never be read as a jump.
-/// - **slowest poll interval < 5 h.** Otherwise a whole window could pass
-///   between two samples and a real rollover would look like a slide.
-const RESET_SLACK: i64 = 30;
+/// Same ±2 min as the state classifier (`ui::TIME_TOL`) because it is the same
+/// question asked about two samples: *time left* grew by more than the clock
+/// ran. The bound is `60 < TIME_TOL < INTERVAL_ACTIVE`, locked by
+/// `time_tolerance_fits_between_noise_and_cadence`.
+const RESET_SLACK: i64 = crate::ui::TIME_TOL;
 
-/// A window rolled over if its reset timestamp jumped forward by **more than the
-/// time that actually passed**, or — as a fallback for servers that keep the
-/// stamp — if usage fell off a cliff.
+/// Did the window roll over between two successful samples?
 ///
-/// The comparison has to be against the clock. An unused 5h window keeps
-/// answering `reset_at = now + 5h`: the deadline slides forward by exactly the
-/// poll interval on every poll, so an absolute "moved more than 2 minutes" test
-/// fires every single time — that is the toast storm where "5 小时额度已重置"
-/// arrived every 3 minutes with 已用 0% and the reset time walking forward. A
-/// real rollover moves the deadline by the leftover of the old window *plus*
-/// the elapsed time, so it stands out by hours, not minutes.
+/// The test is on **time left**, `L = reset_at − t`, which within one window can
+/// only ever shrink:
+///
+/// ```text
+/// ΔL = (R − now) − (R₀ − at₀) = (R − R₀) − (now − at₀) > ε   → 新周期
+/// ```
+///
+/// - A running window: `L` drops by exactly the elapsed time, `ΔL = −Δt`.
+/// - An **unused** window: the server re-anchors it to `R = query + H` on every
+///   request (DEVDOC §6.2), so `ΔL = 0` — the old absolute test
+///   `R − R₀ > 120 s` fired on every poll here, which is the toast storm.
+/// - A rollover: the old window is near its end when it flips, so `L` jumps
+///   back up to ~`H`, i.e. `ΔL ≈ 5h`. Orders of magnitude above `ε`.
+/// - A window that merely *starts* (ready → running): the new anchor is later
+///   than the previous query, so `ΔL ≤ 0`. Never reported. ✓
+///
+/// The second test is the fallback for a server that keeps `reset_at` on a
+/// rollover: a drop of 20 points of *used* is a banked/instant reset.
 ///
 /// `prev.at == 0` means the mark predates this check (older state.json); the
 /// timestamp signal is skipped for that one poll and the mark is rewritten with
 /// a stamp, so the next poll compares normally.
-///
-/// This is deliberately independent of the bucket: a cycle that only burns 5%
-/// of the quota stays in bucket 5 the whole time, so bucket comparison alone
-/// would miss the reset entirely.
 fn rolled_over(prev: &Mark, used: f64, reset_at: i64, now: i64) -> bool {
     if reset_at > 0 && prev.reset_at > 0 && prev.at > 0 {
         let elapsed = (now - prev.at).max(0);
@@ -371,6 +373,12 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
             };
 
             let snap = api::fetch();
+            // Every decision below is about *this* sample, so it is dated by the
+            // sample itself (`Snapshot::at`, taken when the request went out) and
+            // not by the loop's tick clock. That keeps `Mark::at` and `View::at`
+            // the same instant, which is what `rolled_over` and `ui::cycle_state`
+            // both assume.
+            let now = snap.at;
             let mut toasts: Vec<Toast> = Vec::new();
 
             {
@@ -595,25 +603,26 @@ mod tests {
         assert!(toasts[0].title.contains("已重置"));
     }
 
-    /// The two bounds `RESET_SLACK` depends on. Both are properties of the
-    /// schedule, so they belong in a test: if someone shortens the idle cadence
-    /// below the slack, or raises the slack above the fastest retry, the
-    /// rollover test silently starts lying again.
+    /// The tolerance has to sit between the noise floor and the cadence.
+    ///
+    /// Below the noise floor (~60 s: the timestamps are minute-precision and a
+    /// single query may take a minute) an idle window's flat `ΔL` would read as
+    /// a jump. Above the fastest normal cadence (180 s) a single poll's worth of
+    /// drift would be indistinguishable from a real rollover.
     #[test]
-    fn slack_fits_between_polls_and_window() {
+    fn time_tolerance_fits_between_noise_and_cadence() {
         assert!(
-            RESET_SLACK < RETRY_AFTER_ERROR,
-            "slack must stay under the fastest poll interval, or one poll of \
-             server jitter can reach the threshold"
+            RESET_SLACK > 60,
+            "must cover minute-precision stamps plus one slow query"
         );
+        assert!(
+            RESET_SLACK < INTERVAL_ACTIVE,
+            "must stay under the fastest normal poll cadence"
+        );
+        assert!(INTERVAL_ACTIVE < INTERVAL_IDLE, "active must poll faster");
         assert!(
             INTERVAL_IDLE < 18_000,
-            "the slowest poll must be well inside a 5h window, or a real \
-             rollover looks like a slide"
-        );
-        assert!(
-            INTERVAL_IDLE > RETRY_AFTER_ERROR && INTERVAL_ACTIVE > RETRY_AFTER_ERROR,
-            "a normal cadence must be slower than the error retry"
+            "the slowest poll must be well inside a 5h window"
         );
     }
 

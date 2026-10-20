@@ -103,10 +103,13 @@ pub fn render_all(dir: &str) {
             v.show_used = true;
             v
         }),
-        // the untouched 5h window: no timestamp, just "ready"
+        // the untouched 5h window: no timestamp, just "ready".
+        // `demo_view` dates the sample 42 s back, so `reset_at − at` is 18 042 —
+        // inside the ±2 min tolerance, i.e. exactly the kind of jitter the
+        // classifier has to swallow.
         ("ready", {
             let mut v = demo_view(now, 0.0, 24.0, None);
-            v.rows[0].reset_at = now + 17_990;
+            v.rows[0].reset_at = now + 18_000;
             v
         }),
     ];

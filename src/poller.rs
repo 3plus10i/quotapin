@@ -132,6 +132,35 @@ fn rolled_over(prev: &Mark, used: f64, reset_at: i64, now: i64) -> bool {
     used + 20.0 <= prev.used
 }
 
+/// The launch announcement: one toast on the first successful fetch saying the
+/// tool is up and what both windows currently hold.
+///
+/// Tied to the first *successful* poll rather than to process start, so a launch
+/// with no network greets once the data actually arrives instead of announcing
+/// an empty panel. `App::drain_toasts` drops it when 静默运行 is on.
+fn greeting(snap: &Snapshot) -> Toast {
+    let mut parts: Vec<String> = Vec::new();
+    for r in snap.rows.iter().take(2) {
+        parts.push(format!(
+            "{} {}",
+            short_label(r.window.limit_secs, &r.label),
+            crate::fmt::pct(r.window.remaining())
+        ));
+    }
+    if snap.credits_available > 0 {
+        parts.push(format!("重置机会 {} 次", snap.credits_available));
+    }
+    Toast {
+        title: "QuotaPin 已启动".into(),
+        body: if parts.is_empty() {
+            "已连接，正在读取余量".into()
+        } else {
+            parts.join(" · ")
+        },
+        kind: 0,
+    }
+}
+
 fn process_notifications(
     snap: &Snapshot,
     cfg: &mut Config,
@@ -282,6 +311,7 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
     let mut failures: i32 = 0;
     let mut last_fg: Option<bool> = None;
     let mut tick: u32 = 0;
+    let mut greeted = false;
 
     loop {
         std::thread::sleep(Duration::from_millis(250));
@@ -350,6 +380,11 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
                     process_credit_expiry(&snap, &mut c, now, &mut toasts);
                     c.save();
                 }
+            }
+
+            if snap.ok && !greeted {
+                greeted = true;
+                toasts.push(greeting(&snap));
             }
 
             if snap.ok {
@@ -580,6 +615,25 @@ mod tests {
             INTERVAL_IDLE > RETRY_AFTER_ERROR && INTERVAL_ACTIVE > RETRY_AFTER_ERROR,
             "a normal cadence must be slower than the error retry"
         );
+    }
+
+    /// The launch toast is the only notification that is not an event: it has
+    /// to carry both windows at once, and it must not look like a warning.
+    #[test]
+    fn the_launch_toast_names_both_windows() {
+        let t = greeting(&snap(20.0, 8.0));
+        assert_eq!(t.title, "QuotaPin 已启动");
+        assert_eq!(t.body, "5h 80% · 7d 92% · 重置机会 2 次");
+        assert_eq!(t.kind, 0);
+
+        // no credits -> do not claim "0 次"
+        let mut none = snap(0.0, 0.0);
+        none.credits_available = 0;
+        assert_eq!(greeting(&none).body, "5h 100% · 7d 100%");
+
+        // a successful fetch without rows still says something
+        let empty = Snapshot { at: 1, ok: true, ..Default::default() };
+        assert!(!greeting(&empty).body.is_empty());
     }
 
     #[test]

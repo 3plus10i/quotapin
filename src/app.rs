@@ -727,8 +727,7 @@ pub fn run() -> i32 {
         APP = app_ptr;
     }
 
-    poller::spawn(msg, shared, app().cfg.clone());
-    unsafe {
+    poller::spawn(msg, shared, app().cfg.clone());    unsafe {
         SetTimer(msg, TIMER_REPAINT_ID, 30_000, None);
         PostMessageW(msg, WM_FG, 0, 0);
     }

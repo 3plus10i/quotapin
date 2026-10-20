@@ -341,6 +341,34 @@ pub enum Hover {
 
 // ---------------------------------------------------------------- popover
 
+/// Shown instead of a timestamp while the 5h window sits unused.
+pub const READY_LINE: &str = "重置 已就绪，等待开始使用";
+
+/// How far below a whole window the measured difference may fall and still
+/// count as "not started". The API only re-anchors an unused window when it is
+/// asked, while `View::now` moves on every repaint, so the gap drifts down by
+/// up to one poll interval plus a couple of repaints between fetches.
+const NOT_STARTED_SLACK: i64 = 300;
+
+/// Has the 5h window been opened at all?
+///
+/// An unused window is answered as `reset_at = now + 5h` on *every* request
+/// (DEVDOC §6.2), so it looks freshly allocated forever: 100 % left and a
+/// deadline exactly one window away. Printing `重置 13:01 · 2 小时 46 分后` for
+/// it implies a countdown that is not running, hence the plain sentence.
+///
+/// Load-bearing details: only the 5 小时 row (`limit_secs == 5h`), and the
+/// remaining check is `>= 99.5` so it fires exactly when the big number rounds
+/// to 100 %. Once the window is really used the deadline stops sliding and this
+/// drops out within minutes.
+fn not_started(row: &RowView, now: i64) -> bool {
+    const FIVE_HOURS: i64 = 5 * 3600;
+    row.limit_secs == FIVE_HOURS
+        && row.reset_at > 0
+        && row.remaining >= 99.5
+        && row.reset_at - now >= FIVE_HOURS - NOT_STARTED_SLACK
+}
+
 pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f32, f: &Fonts) {
     let s = |x: f32| x * scale;
     let w = s(POPOVER_W);
@@ -482,7 +510,9 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             bar_fill(t, row, failing || v.stale()),
         );
 
-        let reset_line = if row.reset_at > 0 {
+        let reset_line = if not_started(row, v.now) {
+            READY_LINE.to_string()
+        } else if row.reset_at > 0 {
             format!(
                 "重置 {} · {}",
                 fmt::stamp(row.reset_at, v.now),
@@ -717,6 +747,45 @@ mod tests {
         assert_eq!(bar_fill(&t, &row(604_800, 10.0), false), t.day);
         assert_eq!(bar_fill(&t, &row(18_000, 10.0), false), severity(10.0));
         assert_eq!(bar_fill(&t, &row(604_800, 90.0), true), neutral_bar(true));
-        assert_eq!(bar_fill(&theme(false), &row(604_800, 90.0), false), theme(false).day);
+        assert_eq!(&bar_fill(&theme(false), &row(604_800, 90.0), false), &theme(false).day);
+    }
+
+    /// The 5h row is "ready" only while the window is both untouched and a full
+    /// window away. Both halves matter: an untouched window whose deadline has
+    /// already started sliding is about to be used, and a used window can still
+    /// read 100 % for the first moments.
+    #[test]
+    fn an_untouched_5h_window_reads_ready() {
+        let mut r = row(18_000, 100.0);
+        r.reset_at = 10_000 + 18_000;
+        assert!(not_started(&r, 10_000));
+        assert!(
+            not_started(&r, 10_000 + 240),
+            "the deadline only slides on a fetch; a repaint must not flip it back"
+        );
+        assert!(
+            !not_started(&r, 10_000 + 400),
+            "a running window keeps its timestamp"
+        );
+
+        // 99.6 % still prints as 100 %, so it still reads as ready
+        let mut nearly = row(18_000, 99.6);
+        nearly.reset_at = 10_000 + 18_000;
+        assert!(not_started(&nearly, 10_000));
+
+        // ...but anything visibly consumed is not
+        let mut used = row(18_000, 80.0);
+        used.reset_at = 10_000 + 18_000;
+        assert!(!not_started(&used, 10_000));
+
+        // the weekly row never claims to be waiting to start
+        let mut w = row(604_800, 100.0);
+        w.reset_at = 10_000 + 604_800;
+        assert!(!not_started(&w, 10_000));
+
+        // no timestamp at all: fall back to the unknown path
+        let mut unknown = row(18_000, 100.0);
+        unknown.reset_at = 0;
+        assert!(!not_started(&unknown, 10_000));
     }
 }

@@ -103,6 +103,12 @@ pub fn render_all(dir: &str) {
             v.show_used = true;
             v
         }),
+        // the untouched 5h window: no timestamp, just "ready"
+        ("ready", {
+            let mut v = demo_view(now, 0.0, 24.0, None);
+            v.rows[0].reset_at = now + 17_990;
+            v
+        }),
     ];
 
     for (name, view) in &cases {

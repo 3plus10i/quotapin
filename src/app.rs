@@ -23,6 +23,8 @@ use crate::ui::{self, Fonts, Hover, Theme, View};
 
 pub const APP_NAME: &str = "QuotaPin";
 pub const APP_TITLE: &str = "Codex 余量";
+/// Opened by the first tray-menu row.
+pub const HOMEPAGE: &str = "https://github.com/3plus10i/quotapin";
 
 const CLASS_MSG: &str = "QuotaPin.Msg";
 const CLASS_POP: &str = "QuotaPin.Popover";
@@ -77,6 +79,8 @@ pub struct App {
     icon_px: i32,
     /// which mark variant is on the tray right now
     icon_key: u8,
+    /// the 更新 ghost button was clicked and the result has not landed yet
+    refreshing: bool,
 }
 
 impl App {
@@ -111,6 +115,7 @@ impl App {
             last_pop_hide: 0,
             icon_px: icon_size,
             icon_key: mark::DEFAULT as u8,
+            refreshing: false,
         }
     }
 
@@ -122,6 +127,7 @@ impl App {
             .unwrap_or_default();
         v.now = sys::unix_now();
         v.show_used = self.cfg.lock().map(|c| c.show_used).unwrap_or(false);
+        v.refreshing = self.refreshing;
         v
     }
 
@@ -401,6 +407,8 @@ impl App {
     // ------------------------------------------------------------ events
 
     fn on_data(&mut self) {
+        // any result — success or failure — settles a manual refresh
+        self.refreshing = false;
         self.refresh_tray();
         self.drain_toasts();
         if self.pop_visible {
@@ -418,11 +426,20 @@ impl App {
             .map(|s| s.codex_fg)
             .unwrap_or(false);
         let pinned = self.cfg.lock().map(|c| c.pinned).unwrap_or(false);
-        self.show_mini(fg || pinned);
+        let want = fg || pinned;
+        // The popover is one of our own windows, so focusing it says nothing
+        // about where Codex went. While it is up the mini stays exactly as the
+        // user left it — clicking the mini to read the big card must not make
+        // the little one blink out from under the pointer.
+        if !want && self.pop_visible {
+            return;
+        }
+        self.show_mini(want);
     }
 
     fn on_menu(&mut self, cmd: u32) {
         match cmd {
+            tray::MENU_HOME => sys::open_url(HOMEPAGE),
             tray::MENU_REFRESH => {
                 if let Ok(mut s) = self.shared.lock() {
                     s.force = true;
@@ -469,7 +486,7 @@ impl App {
     fn pop_hover_at(&self, mx: i32, my: i32) -> Hover {
         let off = ui::shadow_offset(self.scale);
         let v = self.view();
-        ui::hit_test(&v, self.scale, mx - off, my - off)
+        ui::hit_test(&v, self.scale, &self.fonts, mx - off, my - off)
     }
 }
 
@@ -570,14 +587,25 @@ unsafe extern "system" fn wndproc_pop(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
             let h = a.pop_hover_at(x, y);
             match h {
-                Hover::Row(_) | Hover::Footer => {
+                Hover::Switch => {
                     {
                         let mut c = a.cfg.lock().unwrap();
                         c.show_used = !c.show_used;
                     }
                     a.save_cfg();
                     a.paint_popover();
-                    a.paint_mini();
+                    if a.mini_visible {
+                        a.paint_mini();
+                    }
+                }
+                Hover::Update => {
+                    // the poller picks `force` up on its next 250 ms tick, so the
+                    // fetch starts now instead of waiting for the regular cadence
+                    if let Ok(mut s) = a.shared.lock() {
+                        s.force = true;
+                    }
+                    a.refreshing = true;
+                    a.paint_popover();
                 }
                 Hover::None => {}
             }

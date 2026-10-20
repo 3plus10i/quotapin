@@ -25,6 +25,8 @@ pub const MENU_PIN: u32 = 2;
 pub const MENU_AUTOSTART: u32 = 3;
 pub const MENU_QUIT: u32 = 4;
 pub const MENU_MUTE: u32 = 5;
+/// The header row: "QuotaPin - 0.x.y", opens the project page.
+pub const MENU_HOME: u32 = 6;
 
 pub struct Tray {
     pub hwnd: HWND,
@@ -158,7 +160,16 @@ pub fn show_menu(hwnd: HWND, pinned: bool, muted: bool, autostart: bool) -> u32 
         let s_mute = sys::wide("静默运行");
         let s_auto = sys::wide("开机自启");
         let s_quit = sys::wide("退出");
+        // Version comes from Cargo.toml via CARGO_PKG_VERSION, the same source
+        // the exe's property sheet uses, so it cannot go stale here either.
+        let s_home = sys::wide(&format!(
+            "{} - {}",
+            crate::app::APP_NAME,
+            env!("CARGO_PKG_VERSION")
+        ));
 
+        AppendMenuW(menu, MF_STRING, MENU_HOME as usize, s_home.as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, MENU_REFRESH as usize, s_refresh.as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_PIN as usize, s_pin.as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_MUTE as usize, s_mute.as_ptr());

@@ -213,6 +213,8 @@ pub struct View {
     pub err: Option<String>,
     pub err_at: i64,
     pub show_used: bool,
+    /// a manual refresh was requested and has not come back yet
+    pub refreshing: bool,
     pub now: i64,
 }
 
@@ -223,13 +225,16 @@ impl View {
     pub fn failing(&self) -> bool {
         self.err.is_some() && self.err_at >= self.at
     }
-    /// Worst remaining across windows, used for the tray icon colour.
-    pub fn worst_remaining(&self) -> Option<f64> {
-        self.rows
-            .iter()
-            .map(|r| r.remaining)
-            .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.min(v))))
-    }
+}
+
+/// What a bar fills with: the same quantity the number beside it shows.
+///
+/// The two surfaces (popover, mini) must not each decide this on their own —
+/// they did once, and switching to 用量 moved the number while the mini's bar
+/// kept drawing 余量.
+fn bar_frac(row: &RowView, show_used: bool) -> f32 {
+    let pct = if show_used { row.used } else { row.remaining };
+    (pct / 100.0).clamp(0.0, 1.0) as f32
 }
 
 // ---------------------------------------------------------------- fonts
@@ -310,33 +315,30 @@ pub fn mini_shadow_offset(scale: f32) -> i32 {
     (MINI_SHADOW * 0.3 * scale).round() as i32
 }
 
-/// Hit test in card-local coordinates.
-pub fn hit_test(v: &View, scale: f32, x: i32, y: i32) -> Hover {
-    let s = |a: f32| a * scale;
-    let n = v.rows.len().max(1);
-    for i in 0..n {
-        let top = s(ROW_TOP) + i as f32 * s(ROW_H + ROW_GAP) - s(7.0);
-        let bottom = top + s(ROW_H) + s(6.0);
-        if (y as f32) >= top && (y as f32) <= bottom {
-            return Hover::Row(i);
-        }
+/// Hit test in card-local coordinates. Only the two header controls answer:
+/// rows, the bar and the footer are read-only now, so a stray click on the card
+/// does nothing instead of silently flipping the whole panel's meaning.
+pub fn hit_test(v: &View, scale: f32, f: &Fonts, x: i32, y: i32) -> Hover {
+    let h = header_hits(v, scale, f);
+    let inside = |r: (f32, f32, f32, f32)| {
+        (x as f32) >= r.0 && (x as f32) <= r.2 && (y as f32) >= r.1 && (y as f32) <= r.3
+    };
+    if inside(h.switch) {
+        Hover::Switch
+    } else if inside(h.update) {
+        Hover::Update
+    } else {
+        Hover::None
     }
-    let footer_y = s(ROW_TOP)
-        + n as f32 * s(ROW_H)
-        + (n as f32 - 1.0) * s(ROW_GAP)
-        + s(8.0);
-    if (y as f32) >= footer_y && (y as f32) <= footer_y + s(FOOTER_H) {
-        return Hover::Footer;
-    }
-    let _ = x;
-    Hover::None
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hover {
     None,
-    Row(usize),
-    Footer,
+    /// 余量 ⇄ 用量
+    Switch,
+    /// refresh now
+    Update,
 }
 
 // ---------------------------------------------------------------- popover
@@ -406,6 +408,84 @@ pub fn cycle_state(row: &RowView, at: i64) -> Cycle {
     }
 }
 
+/// The card's own title. Measured rather than guessed: the switch button sits
+/// immediately to its right, so a hardcoded offset would drift with the font.
+pub const TITLE: &str = "Codex 余量";
+
+const SWITCH_ICON: f32 = 14.0;
+const SWITCH_BOX: f32 = 20.0;
+const CTRL_H: f32 = 22.0;
+
+/// Clickable regions of the header, in card-local scaled pixels.
+pub struct Hits {
+    pub switch: (f32, f32, f32, f32),
+    /// the "更新 x 分钟前" ghost button
+    pub update: (f32, f32, f32, f32),
+}
+
+/// The header's right-hand text, which doubles as the refresh button's label.
+pub fn status_line(v: &View) -> String {
+    if v.failing() {
+        "更新失败".to_string()
+    } else if v.refreshing {
+        "刷新中…".to_string()
+    } else if v.at == 0 {
+        "读取中…".to_string()
+    } else if v.stale() {
+        format!("{}更新", fmt::ago(v.at, v.now))
+    } else {
+        format!("更新 {}", fmt::ago(v.at, v.now))
+    }
+}
+
+pub fn header_hits(v: &View, scale: f32, f: &Fonts) -> Hits {
+    let s = |a: f32| a * scale;
+    let top = s(HEADER_TOP) - (s(CTRL_H) - s(HEADER_H)) * 0.5;
+    let title_w = f.title.measure(TITLE) as f32 / scale;
+    let sx = s(PAD + title_w + 6.0);
+    let switch = (sx, top, sx + s(SWITCH_BOX), top + s(CTRL_H));
+
+    let text_w = f.meta.measure(&status_line(v)) as f32 / scale;
+    let x1 = s(POPOVER_W - PAD);
+    let x0 = x1 - s(text_w + 12.0);
+    Hits {
+        switch,
+        update: (x0, top, x1, top + s(CTRL_H)),
+    }
+}
+
+/// What the switch's tooltip promises: the mode the click switches *to*, not
+/// the one on screen. Reading "转换为显示用量" while showing 余量 is what makes
+/// the control read as an action rather than a label.
+fn switch_hint(show_used: bool) -> &'static str {
+    if show_used {
+        "转换为显示余量"
+    } else {
+        "转换为显示用量"
+    }
+}
+
+/// The 余量/用量 switch: two arrows pointing opposite ways.
+/// Traced from the reference glyph (24×24, stroke 2, round caps) and drawn as
+/// six capsules, so it stays sharp at every DPI instead of being a baked bitmap.
+fn swap_glyph(c: &mut Canvas, x: f32, y: f32, size: f32, color: Rgba) {
+    let u = size / 24.0;
+    let w = 2.0 * u;
+    let p = |gx: f32, gy: f32| (x + gx * u, y + gy * u);
+    for (a, b) in [
+        // top arrow → right
+        (p(10.0, 7.0), p(20.0, 7.0)),
+        (p(16.0, 3.0), p(20.0, 7.0)),
+        (p(16.0, 11.0), p(20.0, 7.0)),
+        // bottom arrow ← left
+        (p(4.0, 17.0), p(13.0, 17.0)),
+        (p(8.0, 13.0), p(4.0, 17.0)),
+        (p(8.0, 21.0), p(4.0, 17.0)),
+    ] {
+        c.capsule(a.0, a.1, b.0, b.1, w, color);
+    }
+}
+
 pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f32, f: &Fonts) {
     let s = |x: f32| x * scale;
     let w = s(POPOVER_W);
@@ -420,49 +500,55 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
 
     let pad = s(PAD);
     let failing = v.failing();
+    let hits = header_hits(v, scale, f);
 
-    // header: a severity dot + the title --------------------------------
-    let dot_color = if failing || v.stale() {
-        neutral_bar(t.light)
-    } else {
-        v.worst_remaining()
-            .map(severity)
-            .unwrap_or_else(|| neutral_bar(t.light))
-    };
-    card.circle(
-        pad + s(3.0),
-        s(HEADER_TOP) + s(HEADER_H) * 0.5,
-        s(3.2),
-        dot_color,
-    );
+    // header: title + switch on the left, refresh on the right ------------
     card.text(
         &f.title,
-        "Codex 余量",
-        (pad + s(13.0)) as i32,
+        TITLE,
+        pad as i32,
         s(HEADER_TOP) as i32,
-        (w - pad * 2.0 - s(13.0)) as i32,
+        (hits.switch.0 - s(4.0) - pad) as i32,
         s(HEADER_H) as i32,
         Align::Left,
         t.text,
     );
 
-    let (status, status_color) = if failing {
-        ("更新失败".to_string(), Rgba::hex(0xE04B4B))
+    // ghost button: transparent until hovered, like a toolbar control
+    let (sx0, sy0, sx1, sy1) = hits.switch;
+    if hover == Hover::Switch {
+        card.round_rect(sx0, sy0, sx1, sy1, s(6.0), t.hover);
+    }
+    swap_glyph(
+        &mut card,
+        (sx0 + sx1) * 0.5 - s(SWITCH_ICON) * 0.5,
+        (sy0 + sy1) * 0.5 - s(SWITCH_ICON) * 0.5,
+        s(SWITCH_ICON),
+        if hover == Hover::Switch { t.text } else { t.muted },
+    );
+
+    let (ux0, uy0, ux1, uy1) = hits.update;
+    if hover == Hover::Update {
+        card.round_rect(ux0, uy0, ux1, uy1, s(6.0), t.hover);
+    }
+    let status = status_line(v);
+    let status_color = if failing {
+        Rgba::hex(0xE04B4B)
     } else if v.at == 0 {
-        ("读取中…".to_string(), t.faint)
-    } else if v.stale() {
-        (format!("{}更新", fmt::ago(v.at, v.now)), t.muted)
+        t.faint
+    } else if hover == Hover::Update {
+        t.text
     } else {
-        (format!("更新 {}", fmt::ago(v.at, v.now)), t.muted)
+        t.muted
     };
     card.text(
         &f.meta,
         &status,
-        (w - pad - s(120.0)) as i32,
-        s(HEADER_TOP) as i32,
-        s(120.0) as i32,
-        s(HEADER_H) as i32,
-        Align::Right,
+        (ux0 + s(6.0)) as i32,
+        uy0 as i32,
+        s(POPOVER_W - PAD * 2.0) as i32,
+        s(CTRL_H) as i32,
+        Align::Left,
         status_color,
     );
 
@@ -487,16 +573,6 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
 
     for (i, row) in rows.iter().enumerate() {
         let y = s(ROW_TOP) + i as f32 * s(ROW_H + ROW_GAP);
-        if hover == Hover::Row(i) {
-            card.round_rect(
-                pad - s(6.0),
-                y - s(7.0),
-                w - pad + s(6.0),
-                y + s(ROW_H) - s(1.0),
-                s(8.0),
-                t.hover,
-            );
-        }
         let label = if v.show_used {
             format!("{} · 已用", row.label)
         } else {
@@ -532,11 +608,7 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
         );
 
         // the bar always answers the same question as the big number
-        let frac = if v.show_used {
-            row.used / 100.0
-        } else {
-            row.remaining / 100.0
-        };
+        let frac = bar_frac(row, v.show_used);
         card.bar(
             pad,
             y + s(BAR_TOP),
@@ -577,17 +649,6 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
         + (rows.len().max(1) - 1) as f32 * s(ROW_GAP)
         + s(8.0);
     card.hline(pad, footer_y, w - pad, t.line);
-
-    if hover == Hover::Footer {
-        card.round_rect(
-            pad - s(6.0),
-            footer_y + s(2.0),
-            w - pad + s(6.0),
-            footer_y + s(FOOTER_H) + s(2.0),
-            s(8.0),
-            t.hover,
-        );
-    }
 
     let ty = footer_y + s(8.0);
     let label = "重置机会";
@@ -634,6 +695,33 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
         Align::Right,
         right_color,
     );
+
+    // tooltip: the switch explains what the next click will do --------------
+    //
+    // It sits *beside* the control, not under it: the row directly below is the
+    // 5h label, and a tooltip that blanks it would cost the user the very
+    // numbers they opened the card to read. The gap between the switch and the
+    // refresh label is wide enough for the whole sentence.
+    if hover == Hover::Switch {
+        let hint = switch_hint(v.show_used);
+        let text_w = f.meta.measure(hint) as f32;
+        let bw = text_w + s(14.0);
+        let bh = s(21.0);
+        let bx = hits.switch.2 + s(4.0);
+        let by = (hits.switch.1 + hits.switch.3) * 0.5 - bh * 0.5;
+        let bx = bx.min(w - s(PAD) - bw).max(s(PAD));
+        card.round_rect(bx, by, bx + bw, by + bh, s(5.0), t.text);
+        card.text(
+            &f.meta,
+            hint,
+            (bx + s(7.0)) as i32,
+            by as i32,
+            text_w.ceil() as i32,
+            bh as i32,
+            Align::Left,
+            t.bg,
+        );
+    }
 
     c.blit(&card, s(SHADOW * 0.35) as i32, s(SHADOW * 0.35) as i32);
 }
@@ -695,12 +783,15 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
         // same thickness for both rows, matching the popover
         let bar_h = MINI_BAR_H;
         let mid = y + s(6.0);
+        // the bar answers the same question as the number beside it, exactly
+        // like the popover: in 用量 mode it fills with what was consumed
+        let frac = bar_frac(row, v.show_used);
         card.bar(
             s(34.0),
             mid - s(bar_h) * 0.5,
             s(MINI_W - 34.0 - 46.0),
             s(bar_h),
-            (row.remaining / 100.0) as f32,
+            frac as f32,
             t.track,
             bar_fill(t, row, failing || v.stale()),
         );
@@ -837,6 +928,58 @@ mod tests {
         let mut week = row(604_800, 100.0);
         week.reset_at = at + 604_800;
         assert_eq!(cycle_state(&week, at), Cycle::Ready);
+    }
+
+    /// Reported 2026-10-20: switching to 用量 moved the mini's number but left
+    /// its bar showing 余量. Both surfaces now ask `bar_frac`.
+    #[test]
+    fn the_bar_follows_the_mode() {
+        let r = row(18_000, 25.0); // used = 75
+        assert_eq!(bar_frac(&r, false), 0.25);
+        assert_eq!(bar_frac(&r, true), 0.75);
+        // and it cannot overflow the track
+        let mut odd = row(18_000, -5.0);
+        odd.used = 105.0;
+        assert_eq!(bar_frac(&odd, true), 1.0);
+        assert_eq!(bar_frac(&odd, false), 0.0);
+    }
+
+    /// Only the two header controls take clicks now; the rows, their bars and
+    /// the footer are read-only, so a stray click must do nothing.
+    #[test]
+    fn only_the_header_controls_are_clickable() {
+        let f = Fonts::new(1.0);
+        let mut v = View::default();
+        v.rows = vec![row(18_000, 50.0), row(604_800, 50.0)];
+        v.at = 1;
+        v.now = 30;
+
+        let h = header_hits(&v, 1.0, &f);
+        assert!(
+            h.switch.2 < h.update.0,
+            "the two controls must not overlap (switch ends at {}, update starts at {})",
+            h.switch.2,
+            h.update.0
+        );
+
+        let mid_y = ((h.switch.1 + h.switch.3) * 0.5) as i32;
+        let sw_x = ((h.switch.0 + h.switch.2) * 0.5) as i32;
+        let up_x = ((h.update.0 + h.update.2) * 0.5) as i32;
+        assert_eq!(hit_test(&v, 1.0, &f, sw_x, mid_y), Hover::Switch);
+        assert_eq!(hit_test(&v, 1.0, &f, up_x, mid_y), Hover::Update);
+
+        // a row body / its bar / the footer: nothing
+        for y in [50, 60, 120, 190] {
+            assert_eq!(hit_test(&v, 1.0, &f, 150, y), Hover::None, "y = {y}");
+        }
+    }
+
+    /// The tooltip names the state the click will switch *to*, not the current
+    /// one — that is what makes it read as an action.
+    #[test]
+    fn the_switch_hint_names_the_target_mode() {
+        assert_eq!(switch_hint(false), "转换为显示用量");
+        assert_eq!(switch_hint(true), "转换为显示余量");
     }
 
     /// Why the sample's own timestamp and not the paint clock. `at` is fixed at

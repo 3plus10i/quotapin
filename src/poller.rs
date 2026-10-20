@@ -73,6 +73,7 @@ fn build_view(snap: &Snapshot, cfg: &Config, last_ok: Option<&Snapshot>, now: i6
         err: snap.error.clone(),
         err_at: snap.at,
         show_used: cfg.show_used,
+        refreshing: false,
         now,
     };
     if v.at == 0 {
@@ -315,6 +316,18 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
     let mut tick: u32 = 0;
     let mut greeted = false;
 
+    // Our own windows (popover, tray menu) become the foreground window when the
+    // user opens them. Treating that as "Codex left the foreground" is what made
+    // the mini widget vanish the instant you clicked it — so samples where we are
+    // the foreground app are skipped and the last real answer stands.
+    let own_exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        })
+        .unwrap_or_else(|| "quotapin.exe".to_string());
+
     loop {
         std::thread::sleep(Duration::from_millis(250));
         tick = tick.wrapping_add(1);
@@ -334,16 +347,21 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
                 }
                 n
             };
-            let fg = sys::foreground_exe()
-                .map(|e| names.iter().any(|n| n == &e))
-                .unwrap_or(false);
-            if last_fg != Some(fg) {
-                last_fg = Some(fg);
-                if let Ok(mut s) = shared.lock() {
-                    s.codex_fg = fg;
-                }
-                unsafe {
-                    PostMessageW(hwnd, WM_FOREGROUND, fg as usize, 0);
+            let fg_exe = sys::foreground_exe();
+            // we are the foreground app: the user is looking at our own panel,
+            // which says nothing about where Codex went. Keep the last answer.
+            if fg_exe.as_deref() != Some(own_exe.as_str()) {
+                let fg = fg_exe
+                    .map(|e| names.iter().any(|n| n == &e))
+                    .unwrap_or(false);
+                if last_fg != Some(fg) {
+                    last_fg = Some(fg);
+                    if let Ok(mut s) = shared.lock() {
+                        s.codex_fg = fg;
+                    }
+                    unsafe {
+                        PostMessageW(hwnd, WM_FOREGROUND, fg as usize, 0);
+                    }
                 }
             }
         }

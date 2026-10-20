@@ -37,6 +37,7 @@ fn demo_view(now: i64, used5: f64, used7: f64, err: Option<String>) -> View {
         err: err.clone(),
         err_at: now,
         show_used: false,
+        refreshing: false,
         now,
     }
 }
@@ -112,16 +113,24 @@ pub fn render_all(dir: &str) {
             v.rows[0].reset_at = now + 18_000;
             v
         }),
+        // the ghost refresh button under the pointer, and mid-refresh
+        ("refresh", demo_view(now, 20.0, 8.0, None)),
+        ("refreshing", {
+            let mut v = demo_view(now, 20.0, 8.0, None);
+            v.refreshing = true;
+            v
+        }),
     ];
 
     for (name, view) in &cases {
         for (mode, theme) in [("light", &light), ("dark", &dark)] {
             let (w, h) = ui::popover_size(view.rows.len(), scale);
             let mut c = Canvas::new(w, h);
-            let hover = if *name == "used" {
-                Hover::Row(0)
-            } else {
-                Hover::None
+            let hover = match *name {
+                // the switch hovered: its tooltip is part of the picture
+                "used" => Hover::Switch,
+                "refresh" => Hover::Update,
+                _ => Hover::None,
             };
             ui::paint_popover(&mut c, view, theme, hover, scale, &fonts);
             let bg = if mode == "light" {
@@ -134,15 +143,19 @@ pub fn render_all(dir: &str) {
     }
 
     for (mode, theme) in [("light", &light), ("dark", &dark)] {
-        let (w, h) = ui::mini_size(scale);
-        let mut c = Canvas::new(w, h);
-        ui::paint_mini(&mut c, &demo_view(now, 20.0, 8.0, None), theme, false, scale, &fonts);
-        let bg = if mode == "light" {
-            Rgba::hex(0xE9ECF1)
-        } else {
-            Rgba::hex(0x101317)
-        };
-        save_bmp(&c, bg, &format!("{dir}/mini-{mode}.bmp"));
+        for (suffix, show_used) in [("", false), ("-used", true)] {
+            let (w, h) = ui::mini_size(scale);
+            let mut c = Canvas::new(w, h);
+            let mut v = demo_view(now, 20.0, 8.0, None);
+            v.show_used = show_used;
+            ui::paint_mini(&mut c, &v, theme, false, scale, &fonts);
+            let bg = if mode == "light" {
+                Rgba::hex(0xE9ECF1)
+            } else {
+                Rgba::hex(0x101317)
+            };
+            save_bmp(&c, bg, &format!("{dir}/mini-{mode}{suffix}.bmp"));
+        }
     }
 
     // the three mark variants at 4x, side by side

@@ -367,6 +367,23 @@ pub fn run_value_delete() {
     }
 }
 
+/// Hand a URL to the user's default browser.
+pub fn open_url(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let op = wide("open");
+    let target = wide(url);
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        );
+    }
+}
+
 pub fn apps_use_light_theme() -> bool {
     use windows_sys::Win32::System::Registry::{
         RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,

@@ -234,24 +234,6 @@ impl Canvas {
         self.rect(x0, y, x1 - x0, 1.0, c);
     }
 
-    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
-        let ix0 = ((cx - r).floor() as i32).max(0);
-        let iy0 = ((cy - r).floor() as i32).max(0);
-        let ix1 = ((cx + r).ceil() as i32).min(self.w);
-        let iy1 = ((cy + r).ceil() as i32).min(self.h);
-        for y in iy0..iy1 {
-            for x in ix0..ix1 {
-                let dx = x as f32 + 0.5 - cx;
-                let dy = y as f32 + 0.5 - cy;
-                let d = (dx * dx + dy * dy).sqrt() - r;
-                let cov = (0.5 - d).clamp(0.0, 1.0);
-                if cov > 0.0 {
-                    self.blend(x, y, c, c.a as f32 / 255.0 * cov);
-                }
-            }
-        }
-    }
-
     /// Blit a premultiplied RGBA image, squeezed into `size` x `size`.
     ///
     /// Source pixels are averaged by overlap rather than point-sampled: the
@@ -352,6 +334,40 @@ impl Canvas {
                 let cov = t * t * t;
                 if cov > 0.002 {
                     self.blend(x, y, c, c.a as f32 / 255.0 * cov);
+                }
+            }
+        }
+    }
+
+    /// A stroked line segment with round caps — an SDF capsule.
+    ///
+    /// Small vector glyphs need one of these: the 余量/用量 switch is two arrows
+    /// whose heads sit at 45°, which a stack of axis-aligned rounded rects
+    /// cannot express. Six of these draw it at any DPI without baking a bitmap.
+    pub fn capsule(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, c: Rgba) {
+        if c.a == 0 || width <= 0.0 {
+            return;
+        }
+        let r = width * 0.5;
+        let ix0 = ((x0.min(x1) - r - 1.0).floor() as i32).max(0);
+        let iy0 = ((y0.min(y1) - r - 1.0).floor() as i32).max(0);
+        let ix1 = ((x0.max(x1) + r + 1.0).ceil() as i32).min(self.w);
+        let iy1 = ((y0.max(y1) + r + 1.0).ceil() as i32).min(self.h);
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len2 = (dx * dx + dy * dy).max(1e-6);
+        for y in iy0..iy1 {
+            let py = y as f32 + 0.5;
+            for x in ix0..ix1 {
+                let px = x as f32 + 0.5;
+                let t = (((px - x0) * dx + (py - y0) * dy) / len2).clamp(0.0, 1.0);
+                let qx = px - (x0 + dx * t);
+                let qy = py - (y0 + dy * t);
+                let d = (qx * qx + qy * qy).sqrt() - r;
+                let cov = (0.5 - d).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = c.a as f32 / 255.0 * cov;
+                    self.blend(x, y, c, a);
                 }
             }
         }

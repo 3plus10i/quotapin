@@ -94,7 +94,7 @@ main ─→ app ─→ ui ─→ canvas
 
 **建议的阅读顺序**：`poller.rs`（数据怎么变成 View）→ `ui.rs` 的 `paint_popover`（View 怎么变成像素）→ `app.rs` 的 `run()` 与三个 `wndproc`（它们怎么被串起来）→ `canvas.rs`（像素怎么算的）→ `api.rs`（数据从哪来）。
 
-**调试期本事**：`QuotaPin.exe --render <dir>` 用假数据把面板（亮/暗 × 5 种状态）、小窗、三档 logo、各尺寸托盘图标渲染成 BMP，`scripts/bmp2png.py` 转 PNG。视觉改动能离线成图、可 diff、可进文档，不必真机上反复点。
+**调试期本事**：`QuotaPin.exe --render <dir>` 用假数据把面板（亮/暗 × 6 种状态）、小窗、三档 logo、各尺寸托盘图标渲染成 BMP，`scripts/bmp2png.py` 转 PNG。视觉改动能离线成图、可 diff、可进文档，不必真机上反复点。
 
 ---
 
@@ -124,14 +124,13 @@ main ─→ app ─→ ui ─→ canvas
 ```
 quotapin/
 ├─ Cargo.toml            # 单 bin，release: opt-level=z + lto + panic=abort + strip
-├─ build.rs              # 调 Windows SDK 的 rc.exe 编资源；找不到就跳过（不失败）
+├─ build.rs              # 按 Cargo.toml 的 version 生成 app.rc 再调 rc.exe；找不到 rc 就跳过（不失败）
 ├─ assets/
-│  ├─ app.rc             # 图标 + VERSIONINFO
 │  ├─ icon.ico           # 16~256 多尺寸，128/256 用 PNG 压缩；由 make_logo.py 生成
 │  ├─ mark.bin           # 三档沙漏 × 16/20/24/32/48，预乘位图，编译期 include_bytes! 进 exe
 │  └─ logo.png           # 256px 透明标，README / 文档配图用（不进发布包）
 ├─ scripts/
-│  ├─ build.ps1          # 构建 + 测试 + 打 zip
+│  ├─ build.ps1          # 构建 + 测试 + 打 zip（产物名带版本号）
 │  ├─ make_logo.py       # 源图（横向三格）→ mark.bin / icon.ico / logo.png（用 ffmpeg 解码 PNG）
 │  ├─ bmp2png.py         # 设计走查：--render 产出的 BMP → PNG
 │  ├─ crop.py            # 设计走查：裁一块并最近邻放大，逐像素看
@@ -589,12 +588,21 @@ Canvas（Vec<u32>，预乘 BGRA）
 ## 11. 构建与发布
 
 ```powershell
-cargo build --release                       # 419 KB
-cargo test --release                        # 14 tests
-pwsh -NoProfile -File scripts/build.ps1     # + dist/QuotaPin-0.1.0-win64.zip
+cargo build --release                       # 447 KB
+cargo test --release                        # 26 tests
+pwsh -NoProfile -File scripts/build.ps1     # + dist/QuotaPin-0.1.1-win64.zip
 ```
 
-发布包内容：`QuotaPin.exe` + `README.md`。没有安装器、没有 `install.cmd`——解压双击就是全部流程。logo 只在仓库里给文档用，不随包发。
+发布包内容：`QuotaPin-<version>.exe` + `README.md`。没有安装器、没有 `install.cmd`——解压双击就是全部流程。logo 只在仓库里给文档用，不随包发。
+
+**版本号只有一个来源**：`Cargo.toml` 的 `version`。它同时决定
+
+- 发布包名 `QuotaPin-<version>-win64.zip` 与包内 exe 名 `QuotaPin-<version>.exe`（`scripts/build.ps1` 改名，`target/` 里仍是 `QuotaPin.exe`）；
+- exe 属性 → 详细信息里的「文件版本 / 产品版本 / 文件说明」（`build.rs` **生成** `app.rc`，不再手写）。
+
+手写 `VERSIONINFO` 是典型的"会悄悄过期"的文件：0.1.1 的 exe 一度还写着 0.1.0。现在 `app.rc` 只存在于 `OUT_DIR`，`build.rs` 从 `CARGO_PKG_VERSION` 填 `FILEVERSION`，并声明 `rerun-if-changed=Cargo.toml`，改版本号就自动重编资源。资源用 `#pragma code_page(65001)` + `080404b0` 语言块，所以中文说明不会乱码、属性里显示「中文(简体，中国)」。
+
+**exe 改名带来的副作用**：HKCU Run 里存的是绝对路径，换版本 = 换文件名，开机自启会指向旧文件。`app::heal_autostart()` 在每次启动时比对 Run 值与自身路径，不一致就改写成自己，用户不必重新勾一次。
 
 体积来源与手段：
 
@@ -605,7 +613,7 @@ pwsh -NoProfile -File scripts/build.ps1     # + dist/QuotaPin-0.1.0-win64.zip
 | 零 UI 框架、零 TLS 库（用系统 WinHTTP） | 省掉 2–3 MB |
 | 图标以 DIB 形式内嵌 | 8 个尺寸共 94 KB（128/256 用 PNG 压缩），三档托盘标另占 53 KB |
 
-`build.rs` 会自己找 `rc.exe`：`QUOTAPIN_RC` 环境变量 → `PATH` → `C:\Program Files (x86)\Windows Kits\10\bin\*\x64\rc.exe`（取最高版本）。找不到时打一条 warning 继续编译，只是 exe 没有图标资源。
+`build.rs` 会自己找 `rc.exe`：`QUOTAPIN_RC` 环境变量 → `PATH` → `C:\Program Files (x86)\Windows Kits\10\bin\*\x64\rc.exe`（取最高版本）。找不到时打一条 warning 继续编译，只是 exe 没有图标和版本资源。生成的 `.rc` 里图标路径用**正斜杠**：rc.exe 会对字符串做 C 转义，`D:\2026-…\assets` 会被吃成 `\2`（八进制）和 `\a`（BEL），报"file not found"但路径看着几乎没错。
 
 ### 开发期命令
 

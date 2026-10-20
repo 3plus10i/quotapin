@@ -700,6 +700,23 @@ unsafe extern "system" fn wndproc_mini(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
 // ------------------------------------------------------------------ boot
 
+/// 开机自启存的是**绝对路径**，而产物文件名带版本号，升级就等于换了文件名。
+/// 不重写的话，开机还在启动上一个版本（或一个已被删掉的文件）。所以每次启动
+/// 只要发现 Run 值指向的不是自己，就地改成自己 —— 用户不需要重新勾一次。
+fn heal_autostart() {
+    let Some(stored) = sys::run_value_get() else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let cur = exe.to_string_lossy().to_string();
+    if stored.trim_matches('"').eq_ignore_ascii_case(&cur) {
+        return;
+    }
+    sys::run_value_set(&cur);
+}
+
 pub fn run() -> i32 {
     sys::register_class(CLASS_MSG, wndproc_msg, false);
     sys::register_class(CLASS_POP, wndproc_pop, false);
@@ -727,11 +744,13 @@ pub fn run() -> i32 {
         APP = app_ptr;
     }
 
-    poller::spawn(msg, shared, app().cfg.clone());    unsafe {
+    poller::spawn(msg, shared, app().cfg.clone());
+    unsafe {
         SetTimer(msg, TIMER_REPAINT_ID, 30_000, None);
         PostMessageW(msg, WM_FG, 0, 0);
     }
     app().refresh_tray();
+    heal_autostart();
 
     sys::run_message_loop();
 

@@ -25,7 +25,11 @@ try {
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-    Copy-Item 'target/release/QuotaPin.exe' $stage
+    # The staged exe carries the version, so two downloads side by side are
+    # distinguishable without opening the file. cargo's own output stays
+    # QuotaPin.exe; only the artifact is renamed.
+    $exeName = "QuotaPin-$version.exe"
+    Copy-Item 'target/release/QuotaPin.exe' (Join-Path $stage $exeName)
     Copy-Item 'README.md' $stage
 
     $zip = Join-Path $dist "QuotaPin-$version-win64.zip"
@@ -35,7 +39,7 @@ try {
     $exe = Get-Item 'target/release/QuotaPin.exe'
     $kb = { param($f) [math]::Round((Get-Item $f).Length / 1KB, 1) }
     Write-Host ''
-    Write-Host ("exe : {0} KB" -f (& $kb $exe.FullName))
+    Write-Host ("exe : {0} KB  ({1})" -f (& $kb $exe.FullName), $exeName)
     Write-Host ("zip : {0} KB -> {1}" -f (& $kb $zip), $zip)
 }
 finally {

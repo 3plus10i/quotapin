@@ -311,7 +311,7 @@ const TIME_BAR_H: f32 = 3.0;
 const TIME_GAP: f32 = 1.0;
 /// Amber, and only for time. It must not collide with `severity()`'s three
 /// shades, or a 40 % quota bar and a half-elapsed clock would look identical.
-const TIME_FILL: Rgba = Rgba::hex(0xF4AF09);
+const TIME_FILL: Rgba = Rgba::hex(0xECA809);
 const MINI_BAR_H: f32 = 3.0;
 const BAR_TOP: f32 = 25.0;
 const BOTTOM: f32 = 12.0;

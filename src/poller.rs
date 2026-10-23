@@ -298,6 +298,32 @@ fn process_credit_expiry(
     });
 }
 
+/// Banked reset credits went **up**: the account earned one (a referral, a
+/// purchase, a grant). Reported once per increase, with the delta and the new
+/// total, because "you have 3" says nothing about whether anything happened.
+///
+/// A drop is deliberately silent — spending a credit is something the user just
+/// did, and §6.3 already covers the credits that are about to expire. `None`
+/// means we have never looked (fresh install, or a state file from before this
+/// check existed), so the first sample only records a baseline; without that,
+/// every launch would claim a gain that happened days ago.
+fn process_credit_increase(snap: &Snapshot, cfg: &mut Config, toasts: &mut Vec<Toast>) {
+    let now = snap.credits_available;
+    let Some(prev) = cfg.last_credits else {
+        cfg.last_credits = Some(now);
+        return;
+    };
+    if now > prev {
+        toasts.push(Toast {
+            title: "储备重置机会增加！".into(),
+            body: format!("储备重置增加了 {} 次，当前共持有 {} 次。", now - prev, now),
+            // good news, painted with the product mark like a reset
+            kind: 2,
+        });
+    }
+    cfg.last_credits = Some(now);
+}
+
 pub fn spawn(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
     // HWND is a raw pointer and therefore not Send; the numeric value is stable
     // for the lifetime of the window, so it can cross the thread boundary.
@@ -403,6 +429,7 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
                 let mut c = cfg.lock().unwrap();
                 if snap.ok {
                     process_notifications(&snap, &mut c, now, &mut toasts);
+                    process_credit_increase(&snap, &mut c, &mut toasts);
                     process_credit_expiry(&snap, &mut c, now, &mut toasts);
                     c.save();
                 }
@@ -672,6 +699,42 @@ mod tests {
             process_notifications(&snap(31.0, 12.0), &mut cfg, 2_000, &mut toasts);
         }
         assert!(toasts.is_empty());
+    }
+
+    /// Earning a credit is an event; losing one is not. And the first sample
+    /// only sets a baseline, or every launch would announce a gain from days ago.
+    #[test]
+    fn earning_a_credit_is_announced_once() {
+        let mut cfg = Config::default();
+        let mut toasts = Vec::new();
+
+        let mut s = snap(0.0, 0.0);
+        s.credits_available = 2;
+        process_credit_increase(&s, &mut cfg, &mut toasts);
+        assert!(toasts.is_empty(), "the first sample is only a baseline");
+        assert_eq!(cfg.last_credits, Some(2));
+
+        process_credit_increase(&s, &mut cfg, &mut toasts);
+        assert!(toasts.is_empty(), "no change, no toast");
+
+        s.credits_available = 3;
+        process_credit_increase(&s, &mut cfg, &mut toasts);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].title, "储备重置机会增加！");
+        assert_eq!(toasts[0].body, "储备重置增加了 1 次，当前共持有 3 次。");
+        assert_eq!(toasts[0].kind, 2);
+
+        // spending one is silent, and the lower total becomes the new baseline
+        s.credits_available = 1;
+        process_credit_increase(&s, &mut cfg, &mut toasts);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(cfg.last_credits, Some(1));
+
+        // ...so the next gain is measured from 1, not from 3
+        s.credits_available = 4;
+        process_credit_increase(&s, &mut cfg, &mut toasts);
+        assert_eq!(toasts.len(), 2);
+        assert_eq!(toasts[1].body, "储备重置增加了 3 次，当前共持有 4 次。");
     }
 
     #[test]

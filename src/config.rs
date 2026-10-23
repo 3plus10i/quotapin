@@ -39,6 +39,10 @@ pub struct Config {
     pub marks: BTreeMap<String, Mark>,
     /// reset-credit ids we already warned about
     pub warned_credits: Vec<String>,
+    /// how many banked reset credits the last successful poll saw. `None` means
+    /// "never looked", which is why a fresh install does not announce a gain it
+    /// did not witness (see `poller::process_credit_increase`).
+    pub last_credits: Option<i64>,
     /// last local day the expiry check ran ("2026-10-19")
     pub expiry_day: String,
     /// extra foreground executable names that should raise the mini widget
@@ -54,6 +58,7 @@ impl Default for Config {
             show_used: false,
             marks: BTreeMap::new(),
             warned_credits: Vec::new(),
+            last_credits: None,
             expiry_day: String::new(),
             extra_procs: Vec::new(),
         }
@@ -114,6 +119,7 @@ impl Config {
                 }
             }
         }
+        c.last_credits = v.get("last_credits").and_then(|x| x.as_i64());
         c.expiry_day = v
             .get("expiry_day")
             .and_then(|x| x.as_str())
@@ -162,6 +168,7 @@ impl Config {
             "show_used": self.show_used,
             "marks": marks,
             "warned_credits": self.warned_credits,
+            "last_credits": self.last_credits,
             "expiry_day": self.expiry_day,
             "extra_procs": self.extra_procs,
         })
@@ -199,11 +206,15 @@ mod tests {
             },
         );
         c.warned_credits.push("abc".into());
+        c.last_credits = Some(3);
         c.mini_pos = Some((10, 20));
         let back = Config::from_value(&c.to_value());
         assert_eq!(back.marks["5 小时"].bucket, 4);
         assert_eq!(back.marks["5 小时"].used, 21.0);
         assert_eq!(back.warned_credits, vec!["abc".to_string()]);
         assert_eq!(back.mini_pos, Some((10, 20)));
+        // the credit baseline survives a restart, otherwise the next launch
+        // would re-announce the last gain
+        assert_eq!(back.last_credits, Some(3));
     }
 }

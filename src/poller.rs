@@ -73,6 +73,7 @@ fn build_view(snap: &Snapshot, cfg: &Config, last_ok: Option<&Snapshot>, now: i6
         err: snap.error.clone(),
         err_at: snap.at,
         show_used: cfg.show_used,
+        show_time: cfg.show_time,
         refreshing: false,
         now,
     };

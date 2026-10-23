@@ -127,6 +127,7 @@ impl App {
             .unwrap_or_default();
         v.now = sys::unix_now();
         v.show_used = self.cfg.lock().map(|c| c.show_used).unwrap_or(false);
+        v.show_time = self.cfg.lock().map(|c| c.show_time).unwrap_or(true);
         v.refreshing = self.refreshing;
         v
     }
@@ -591,6 +592,17 @@ unsafe extern "system" fn wndproc_pop(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     {
                         let mut c = a.cfg.lock().unwrap();
                         c.show_used = !c.show_used;
+                    }
+                    a.save_cfg();
+                    a.paint_popover();
+                    if a.mini_visible {
+                        a.paint_mini();
+                    }
+                }
+                Hover::Time => {
+                    {
+                        let mut c = a.cfg.lock().unwrap();
+                        c.show_time = !c.show_time;
                     }
                     a.save_cfg();
                     a.paint_popover();

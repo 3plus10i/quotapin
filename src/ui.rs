@@ -213,6 +213,8 @@ pub struct View {
     pub err: Option<String>,
     pub err_at: i64,
     pub show_used: bool,
+    /// draw the countdown bar under each quota bar
+    pub show_time: bool,
     /// a manual refresh was requested and has not come back yet
     pub refreshing: bool,
     pub now: i64,
@@ -313,6 +315,10 @@ const TIME_GAP: f32 = 1.0;
 /// shades, or a 40 % quota bar and a half-elapsed clock would look identical.
 const TIME_FILL: Rgba = Rgba::hex(0xECA809);
 const MINI_BAR_H: f32 = 3.0;
+/// The mini's countdown bar: 3dp of quota + 1dp gap + 2dp of clock fits the
+/// 50dp card between the two rows with room to spare, so the same stack works
+/// here as in the panel — just squeezed by a dp.
+const MINI_TIME_H: f32 = 2.0;
 const BAR_TOP: f32 = 25.0;
 const BOTTOM: f32 = 12.0;
 
@@ -345,9 +351,9 @@ pub fn mini_shadow_offset(scale: f32) -> i32 {
     (MINI_SHADOW * 0.3 * scale).round() as i32
 }
 
-/// Hit test in card-local coordinates. Only the two header controls answer:
-/// rows, the bar and the footer are read-only now, so a stray click on the card
-/// does nothing instead of silently flipping the whole panel's meaning.
+/// Hit test in card-local coordinates. Only the three header controls answer:
+/// rows, the bar and the footer are read-only, so a stray click on the card does
+/// nothing instead of silently flipping the whole panel's meaning.
 pub fn hit_test(v: &View, scale: f32, f: &Fonts, x: i32, y: i32) -> Hover {
     let h = header_hits(v, scale, f);
     let inside = |r: (f32, f32, f32, f32)| {
@@ -355,6 +361,8 @@ pub fn hit_test(v: &View, scale: f32, f: &Fonts, x: i32, y: i32) -> Hover {
     };
     if inside(h.switch) {
         Hover::Switch
+    } else if inside(h.time) {
+        Hover::Time
     } else if inside(h.update) {
         Hover::Update
     } else {
@@ -367,6 +375,8 @@ pub enum Hover {
     None,
     /// 余量 ⇄ 用量
     Switch,
+    /// show / hide the countdown bars
+    Time,
     /// refresh now
     Update,
 }
@@ -449,6 +459,8 @@ const CTRL_H: f32 = 22.0;
 /// Clickable regions of the header, in card-local scaled pixels.
 pub struct Hits {
     pub switch: (f32, f32, f32, f32),
+    /// show / hide the countdown bars
+    pub time: (f32, f32, f32, f32),
     /// the "更新 x 分钟前" ghost button
     pub update: (f32, f32, f32, f32),
 }
@@ -474,13 +486,27 @@ pub fn header_hits(v: &View, scale: f32, f: &Fonts) -> Hits {
     let title_w = f.title.measure(TITLE) as f32 / scale;
     let sx = s(PAD + title_w + 6.0);
     let switch = (sx, top, sx + s(SWITCH_BOX), top + s(CTRL_H));
+    // the second control sits right after the switch: same box, 4dp apart, so
+    // the pair reads as one toolbar without either losing its hit area
+    let tx = switch.2 + s(4.0);
+    let time = (tx, top, tx + s(SWITCH_BOX), top + s(CTRL_H));
 
     let text_w = f.meta.measure(&status_line(v)) as f32 / scale;
     let x1 = s(POPOVER_W - PAD);
     let x0 = x1 - s(text_w + 12.0);
     Hits {
         switch,
+        time,
         update: (x0, top, x1, top + s(CTRL_H)),
+    }
+}
+
+/// What the clock button promises: the state a click switches *to*.
+fn time_hint(show_time: bool) -> &'static str {
+    if show_time {
+        "隐藏时间条"
+    } else {
+        "显示时间条"
     }
 }
 
@@ -514,6 +540,76 @@ fn swap_glyph(c: &mut Canvas, x: f32, y: f32, size: f32, color: Rgba) {
     ] {
         c.capsule(a.0, a.1, b.0, b.1, w, color);
     }
+}
+
+/// The time-bar toggle: a clock whose dial opens at the lower right, with an
+/// arrow standing where the gap is.
+///
+/// Same construction as `swap_glyph` — capsules traced from the 24×24 reference
+/// — because the ring is only 5 px across at the size this is drawn at, and a
+/// bitmap or a full `ring_round` would either blur or close the gap the glyph
+/// depends on. The dial is a polyline: 28 capsules around the circle, skipping
+/// the 83° sector the arrow occupies.
+fn clock_glyph(c: &mut Canvas, x: f32, y: f32, size: f32, color: Rgba) {
+    use std::f32::consts::{PI, TAU};
+    let u = size / 24.0;
+    let w = 2.0 * u;
+    let p = |gx: f32, gy: f32| (x + gx * u, y + gy * u);
+
+    let r = 9.0;
+    let gap = 0.725; // half of the ~83° opening, centred on the 45° diagonal
+    let start = PI * 0.25 + gap;
+    let end = PI * 0.25 - gap + TAU;
+    let steps = 28;
+    let mut prev = p(12.0 + r * start.cos(), 12.0 + r * start.sin());
+    for i in 1..=steps {
+        let a = start + (end - start) * i as f32 / steps as f32;
+        let cur = p(12.0 + r * a.cos(), 12.0 + r * a.sin());
+        c.capsule(prev.0, prev.1, cur.0, cur.1, w, color);
+        prev = cur;
+    }
+
+    // hands: 12 → centre → 4:30
+    for (a, b) in [
+        (p(12.0, 7.0), p(12.0, 12.0)),
+        (p(12.0, 12.0), p(14.5, 14.5)),
+        // arrow: shaft up, then the head
+        (p(19.0, 22.0), p(19.0, 16.0)),
+        (p(22.0, 19.0), p(19.0, 16.0)),
+        (p(16.0, 19.0), p(19.0, 16.0)),
+    ] {
+        c.capsule(a.0, a.1, b.0, b.1, w, color);
+    }
+}
+
+/// Tooltip under a ghost button. It is drawn to the *right* of the control, not
+/// below it: the row underneath is where the numbers live.
+fn draw_tooltip(
+    card: &mut Canvas,
+    f: &Fonts,
+    t: &Theme,
+    anchor: (f32, f32, f32, f32),
+    hint: &str,
+    scale: f32,
+    card_w: f32,
+) {
+    let s = |x: f32| x * scale;
+    let text_w = f.meta.measure(hint) as f32;
+    let bw = text_w + s(14.0);
+    let bh = s(21.0);
+    let bx = (anchor.2 + s(4.0)).min(card_w - s(PAD) - bw).max(s(PAD));
+    let by = (anchor.1 + anchor.3) * 0.5 - bh * 0.5;
+    card.round_rect(bx, by, bx + bw, by + bh, s(5.0), t.text);
+    card.text(
+        &f.meta,
+        hint,
+        (bx + s(7.0)) as i32,
+        by as i32,
+        text_w.ceil() as i32,
+        bh as i32,
+        Align::Left,
+        t.bg,
+    );
 }
 
 pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f32, f: &Fonts) {
@@ -555,6 +651,25 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
         (sy0 + sy1) * 0.5 - s(SWITCH_ICON) * 0.5,
         s(SWITCH_ICON),
         if hover == Hover::Switch { t.text } else { t.muted },
+    );
+
+    // the clock: same ghost treatment, but its colour carries the state as well
+    // as the hover — a toggle that looks identical in both positions is a guess
+    let (tx0, ty0, tx1, ty1) = hits.time;
+    if hover == Hover::Time {
+        card.round_rect(tx0, ty0, tx1, ty1, s(6.0), t.hover);
+    }
+    let clock_color = if v.show_time {
+        if hover == Hover::Time { t.text } else { t.muted }
+    } else {
+        t.faint
+    };
+    clock_glyph(
+        &mut card,
+        (tx0 + tx1) * 0.5 - s(SWITCH_ICON) * 0.5,
+        (ty0 + ty1) * 0.5 - s(SWITCH_ICON) * 0.5,
+        s(SWITCH_ICON),
+        clock_color,
     );
 
     let (ux0, uy0, ux1, uy1) = hits.update;
@@ -650,19 +765,21 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
         );
 
         // the time bar: full right after a reset, empty at the deadline
-        card.bar(
-            pad,
-            y + s(BAR_TOP + BAR_H + TIME_GAP),
-            w - pad * 2.0,
-            s(TIME_BAR_H),
-            time_frac(row, v),
-            t.track,
-            if failing || v.stale() {
-                neutral_bar(t.light)
-            } else {
-                TIME_FILL
-            },
-        );
+        if v.show_time {
+            card.bar(
+                pad,
+                y + s(BAR_TOP + BAR_H + TIME_GAP),
+                w - pad * 2.0,
+                s(TIME_BAR_H),
+                time_frac(row, v),
+                t.track,
+                if failing || v.stale() {
+                    neutral_bar(t.light)
+                } else {
+                    TIME_FILL
+                },
+            );
+        }
 
         // 只有 5 小时那一行改口径（7 天那一行仍按原样显示时间戳）。
         let reset_line = if row.limit_secs == 18_000 && cycle_state(row, v.at) == Cycle::Ready {
@@ -748,24 +865,9 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
     // numbers they opened the card to read. The gap between the switch and the
     // refresh label is wide enough for the whole sentence.
     if hover == Hover::Switch {
-        let hint = switch_hint(v.show_used);
-        let text_w = f.meta.measure(hint) as f32;
-        let bw = text_w + s(14.0);
-        let bh = s(21.0);
-        let bx = hits.switch.2 + s(4.0);
-        let by = (hits.switch.1 + hits.switch.3) * 0.5 - bh * 0.5;
-        let bx = bx.min(w - s(PAD) - bw).max(s(PAD));
-        card.round_rect(bx, by, bx + bw, by + bh, s(5.0), t.text);
-        card.text(
-            &f.meta,
-            hint,
-            (bx + s(7.0)) as i32,
-            by as i32,
-            text_w.ceil() as i32,
-            bh as i32,
-            Align::Left,
-            t.bg,
-        );
+        draw_tooltip(&mut card, f, t, hits.switch, switch_hint(v.show_used), scale, w);
+    } else if hover == Hover::Time {
+        draw_tooltip(&mut card, f, t, hits.time, time_hint(v.show_time), scale, w);
     }
 
     c.blit(&card, s(SHADOW * 0.35) as i32, s(SHADOW * 0.35) as i32);
@@ -826,20 +928,42 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             t.muted,
         );
         // same thickness for both rows, matching the popover
+        //
+        // The stack starts on a whole dp instead of being centred on the text:
+        // an odd bar (3dp) centred on a 6dp grid lands on half pixels, and the
+        // 1dp gap then gets split across two anti-aliased rows — which reads as
+        // one fused bar with a stripe, not as two bars.
         let bar_h = MINI_BAR_H;
-        let mid = y + s(6.0);
+        let top = y + s(4.0);
         // the bar answers the same question as the number beside it, exactly
         // like the popover: in 用量 mode it fills with what was consumed
         let frac = bar_frac(row, v.show_used);
         card.bar(
             s(34.0),
-            mid - s(bar_h) * 0.5,
+            top,
             s(MINI_W - 34.0 - 46.0),
             s(bar_h),
             frac as f32,
             t.track,
             bar_fill(t, row, failing || v.stale()),
         );
+        // and the countdown bar underneath, one dp thinner than in the panel
+        // because this card only has 50 dp to give
+        if v.show_time {
+            card.bar(
+                s(34.0),
+                top + s(bar_h + TIME_GAP),
+                s(MINI_W - 34.0 - 46.0),
+                s(MINI_TIME_H),
+                time_frac(row, v),
+                t.track,
+                if failing || v.stale() {
+                    neutral_bar(t.light)
+                } else {
+                    TIME_FILL
+                },
+            );
+        }
         let txt = if v.show_used {
             fmt::pct(row.used)
         } else {
@@ -1001,22 +1125,33 @@ mod tests {
 
         let h = header_hits(&v, 1.0, &f);
         assert!(
-            h.switch.2 < h.update.0,
-            "the two controls must not overlap (switch ends at {}, update starts at {})",
+            h.switch.2 < h.time.0 && h.time.2 < h.update.0,
+            "the three controls must not overlap (switch ends {}, clock {}..{}, update starts {})",
             h.switch.2,
+            h.time.0,
+            h.time.2,
             h.update.0
         );
 
         let mid_y = ((h.switch.1 + h.switch.3) * 0.5) as i32;
         let sw_x = ((h.switch.0 + h.switch.2) * 0.5) as i32;
+        let tm_x = ((h.time.0 + h.time.2) * 0.5) as i32;
         let up_x = ((h.update.0 + h.update.2) * 0.5) as i32;
         assert_eq!(hit_test(&v, 1.0, &f, sw_x, mid_y), Hover::Switch);
+        assert_eq!(hit_test(&v, 1.0, &f, tm_x, mid_y), Hover::Time);
         assert_eq!(hit_test(&v, 1.0, &f, up_x, mid_y), Hover::Update);
 
         // a row body / its bar / the footer: nothing
         for y in [50, 60, 120, 190] {
             assert_eq!(hit_test(&v, 1.0, &f, 150, y), Hover::None, "y = {y}");
         }
+    }
+
+    /// Same rule for the clock: it says what the click does, not what is showing.
+    #[test]
+    fn the_time_hint_names_the_target_state() {
+        assert_eq!(time_hint(true), "隐藏时间条");
+        assert_eq!(time_hint(false), "显示时间条");
     }
 
     /// The tooltip names the state the click will switch *to*, not the current

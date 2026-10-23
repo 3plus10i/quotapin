@@ -37,6 +37,7 @@ fn demo_view(now: i64, used5: f64, used7: f64, err: Option<String>) -> View {
         err: err.clone(),
         err_at: now,
         show_used: false,
+        show_time: true,
         refreshing: false,
         now,
     }
@@ -120,6 +121,18 @@ pub fn render_all(dir: &str) {
             v.refreshing = true;
             v
         }),
+        // the clock toggle switched off: only the quota bars are left
+        ("time-off", {
+            let mut v = demo_view(now, 20.0, 8.0, None);
+            v.show_time = false;
+            v
+        }),
+        // ...and the clock button under the pointer, promising to bring them back
+        ("time-hover", {
+            let mut v = demo_view(now, 20.0, 8.0, None);
+            v.show_time = false;
+            v
+        }),
     ];
 
     for (name, view) in &cases {
@@ -130,6 +143,7 @@ pub fn render_all(dir: &str) {
                 // the switch hovered: its tooltip is part of the picture
                 "used" => Hover::Switch,
                 "refresh" => Hover::Update,
+                "time-hover" => Hover::Time,
                 _ => Hover::None,
             };
             ui::paint_popover(&mut c, view, theme, hover, scale, &fonts);

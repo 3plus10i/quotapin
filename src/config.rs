@@ -35,6 +35,8 @@ pub struct Config {
     pub muted: bool,
     /// show "used" instead of "remaining" in the big number
     pub show_used: bool,
+    /// draw the countdown bar under each quota bar (panel and mini)
+    pub show_time: bool,
     /// last seen state per window key ("5 小时" -> Mark)
     pub marks: BTreeMap<String, Mark>,
     /// reset-credit ids we already warned about
@@ -56,6 +58,7 @@ impl Default for Config {
             pinned: false,
             muted: false,
             show_used: false,
+            show_time: true,
             marks: BTreeMap::new(),
             warned_credits: Vec::new(),
             last_credits: None,
@@ -94,6 +97,8 @@ impl Config {
         c.pinned = v.get("pinned").and_then(|x| x.as_bool()).unwrap_or(false);
         c.muted = v.get("muted").and_then(|x| x.as_bool()).unwrap_or(false);
         c.show_used = v.get("show_used").and_then(|x| x.as_bool()).unwrap_or(false);
+        // files from before the toggle existed keep the bars they always had
+        c.show_time = v.get("show_time").and_then(|x| x.as_bool()).unwrap_or(true);
         if let Some(obj) = v.get("marks").and_then(|x| x.as_object()) {
             for (k, val) in obj {
                 let bucket = val.get("bucket").and_then(|x| x.as_i64());
@@ -166,6 +171,7 @@ impl Config {
             "pinned": self.pinned,
             "muted": self.muted,
             "show_used": self.show_used,
+            "show_time": self.show_time,
             "marks": marks,
             "warned_credits": self.warned_credits,
             "last_credits": self.last_credits,
@@ -185,12 +191,17 @@ mod tests {
     fn muting_round_trips_and_old_files_default_to_loud() {
         let mut c = Config::default();
         c.muted = true;
-        assert!(Config::from_value(&c.to_value()).muted);
+        c.show_time = false;
+        let back = Config::from_value(&c.to_value());
+        assert!(back.muted);
+        assert!(!back.show_time);
 
         let legacy = serde_json::json!({ "pinned": true, "show_used": false });
         let parsed = Config::from_value(&legacy);
         assert!(!parsed.muted);
         assert!(parsed.pinned);
+        // a file written before the clock toggle existed keeps its time bars
+        assert!(parsed.show_time);
     }
 
     #[test]

@@ -157,7 +157,7 @@ pub fn show_menu(hwnd: HWND, pinned: bool, muted: bool, autostart: bool) -> u32 
         }
         let s_refresh = sys::wide("立即刷新");
         let s_pin = sys::wide("小窗常驻");
-        let s_mute = sys::wide("静默运行");
+        let s_mute = sys::wide("禁止通知");
         let s_auto = sys::wide("开机自启");
         let s_quit = sys::wide("退出");
         // Version comes from Cargo.toml via CARGO_PKG_VERSION, the same source

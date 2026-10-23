@@ -141,7 +141,7 @@ fn rolled_over(prev: &Mark, used: f64, reset_at: i64, now: i64) -> bool {
 ///
 /// Tied to the first *successful* poll rather than to process start, so a launch
 /// with no network greets once the data actually arrives instead of announcing
-/// an empty panel. `App::drain_toasts` drops it when 静默运行 is on.
+/// an empty panel. `App::drain_toasts` drops it when 禁止通知 is on.
 fn greeting(snap: &Snapshot) -> Toast {
     let mut parts: Vec<String> = Vec::new();
     for r in snap.rows.iter().take(2) {

@@ -31,7 +31,7 @@ pub struct Config {
     pub mini_pos: Option<(i32, i32)>,
     /// pin the mini widget even when Codex is not in the foreground
     pub pinned: bool,
-    /// 静默运行: drop notifications instead of showing them
+    /// 禁止通知: drop notifications instead of showing them
     pub muted: bool,
     /// show "used" instead of "remaining" in the big number
     pub show_used: bool,
@@ -185,7 +185,7 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// 静默运行 has to survive a restart, and a file written before it existed
+    /// 禁止通知 has to survive a restart, and a file written before it existed
     /// has to load as "not muted" instead of failing the whole parse.
     #[test]
     fn muting_round_trips_and_old_files_default_to_loud() {

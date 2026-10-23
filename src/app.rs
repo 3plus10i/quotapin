@@ -388,7 +388,7 @@ impl App {
             .lock()
             .map(|mut s| std::mem::take(&mut s.toasts))
             .unwrap_or_default();
-        // 静默运行: the queue is drained either way. Dropped events are not
+        // 禁止通知: the queue is drained either way. Dropped events are not
         // replayed when notifications come back on — silence means "do not
         // tell me now", not "hold it for later".
         if self.cfg.lock().map(|c| c.muted).unwrap_or(false) {

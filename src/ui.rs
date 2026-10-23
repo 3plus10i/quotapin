@@ -237,6 +237,28 @@ fn bar_frac(row: &RowView, show_used: bool) -> f32 {
     (pct / 100.0).clamp(0.0, 1.0) as f32
 }
 
+/// The countdown bar under each quota bar: how much of the window is *left*.
+///
+/// Full = the whole window still ahead (just reset, or an idle window whose
+/// deadline slides with the clock), empty = the deadline is here. That is the
+/// opposite direction from the quota bar above it, which is why it gets its own
+/// colour instead of reusing green/amber/red — two bars reading the same shade
+/// while running against each other would be actively confusing.
+///
+/// An idle window is pinned to full: with `reset_at = 取数时刻 + H` the ratio is
+/// already 1 by construction, but `now` keeps ticking while the panel sits open,
+/// so without the `Ready` pin the bar would creep down for a window that has not
+/// started. Same reason §6.7 dates the classifier by the sample, not the paint.
+fn time_frac(row: &RowView, v: &View) -> f32 {
+    if cycle_state(row, v.at) == Cycle::Ready {
+        return 1.0;
+    }
+    if row.limit_secs <= 0 || row.reset_at <= 0 || v.now <= 0 {
+        return 0.0;
+    }
+    ((row.reset_at - v.now) as f32 / row.limit_secs as f32).clamp(0.0, 1.0)
+}
+
 // ---------------------------------------------------------------- fonts
 
 pub struct Fonts {
@@ -282,6 +304,14 @@ const FOOTER_H: f32 = 30.0;
 /// One thickness for every window. The two rows are told apart by their labels
 /// and reset lines; bar weight is not a channel we spend on that.
 const BAR_H: f32 = 4.0;
+/// The countdown bar above the reset line: thinner than the quota bar by 1dp and
+/// 1dp below it, so the pair reads as "same row, two readings" rather than two
+/// competing gauges.
+const TIME_BAR_H: f32 = 3.0;
+const TIME_GAP: f32 = 1.0;
+/// Amber, and only for time. It must not collide with `severity()`'s three
+/// shades, or a 40 % quota bar and a half-elapsed clock would look identical.
+const TIME_FILL: Rgba = Rgba::hex(0xF4AF09);
 const MINI_BAR_H: f32 = 3.0;
 const BAR_TOP: f32 = 25.0;
 const BOTTOM: f32 = 12.0;
@@ -617,6 +647,21 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             frac as f32,
             t.track,
             bar_fill(t, row, failing || v.stale()),
+        );
+
+        // the time bar: full right after a reset, empty at the deadline
+        card.bar(
+            pad,
+            y + s(BAR_TOP + BAR_H + TIME_GAP),
+            w - pad * 2.0,
+            s(TIME_BAR_H),
+            time_frac(row, v),
+            t.track,
+            if failing || v.stale() {
+                neutral_bar(t.light)
+            } else {
+                TIME_FILL
+            },
         );
 
         // 只有 5 小时那一行改口径（7 天那一行仍按原样显示时间戳）。
@@ -980,6 +1025,46 @@ mod tests {
     fn the_switch_hint_names_the_target_mode() {
         assert_eq!(switch_hint(false), "转换为显示用量");
         assert_eq!(switch_hint(true), "转换为显示余量");
+    }
+
+    /// The countdown bar runs the opposite way to the quota bar: full at the
+    /// reset, empty at the deadline. And an untouched window stays pinned to
+    /// full however long the panel is left open — the clock moving must not
+    /// drain a window that never started.
+    #[test]
+    fn the_time_bar_counts_down_and_holds_at_ready() {
+        let at = 10_000;
+        let mut v = View::default();
+        v.at = at;
+        v.now = at;
+
+        // just reset — full window still ahead (99 % so it is Running, not Ready)
+        let mut r = row(18_000, 99.0);
+        r.reset_at = at + 18_000;
+        assert_eq!(time_frac(&r, &v), 1.0);
+
+        // halfway through the window
+        v.now = at + 9_000;
+        assert_eq!(time_frac(&r, &v), 0.5);
+
+        // at and past the deadline: empty, never negative
+        v.now = at + 18_000;
+        assert_eq!(time_frac(&r, &v), 0.0);
+        v.now = at + 20_000;
+        assert_eq!(time_frac(&r, &v), 0.0);
+
+        // untouched window: full at fetch time and still full an hour later
+        let mut idle = row(18_000, 100.0);
+        idle.reset_at = at + 18_000;
+        v.now = at;
+        assert_eq!(time_frac(&idle, &v), 1.0);
+        v.now = at + 3_600;
+        assert_eq!(time_frac(&idle, &v), 1.0);
+
+        // no deadline known: nothing to count down
+        let blank = row(18_000, 50.0);
+        v.now = at;
+        assert_eq!(time_frac(&blank, &v), 0.0);
     }
 
     /// Why the sample's own timestamp and not the paint clock. `at` is fixed at

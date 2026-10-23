@@ -1,6 +1,6 @@
 [package]
 name = "quotapin"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.77"
 description = "QuotaPin - 常驻托盘的 Codex 额度显示工具"

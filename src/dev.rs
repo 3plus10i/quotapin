@@ -127,6 +127,15 @@ pub fn render_all(dir: &str) {
             v.show_time = false;
             v
         }),
+        // the sample is older than STALE_AFTER but nothing failed: the bars lose
+        // their colour, the numbers stay readable. Rendered so the two greys can
+        // be compared against "error" side by side.
+        ("stale", {
+            let mut v = demo_view(now, 20.0, 8.0, None);
+            v.at = now - ui::STALE_AFTER - 300;
+            v.err_at = 0;
+            v
+        }),
         // ...and the clock button under the pointer, promising to bring them back
         ("time-hover", {
             let mut v = demo_view(now, 20.0, 8.0, None);

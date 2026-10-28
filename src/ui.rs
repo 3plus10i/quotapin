@@ -89,18 +89,39 @@ pub fn neutral_bar(light: bool) -> Rgba {
     }
 }
 
+/// One step lighter than `neutral_bar`: "this number is old", not "this number
+/// is gone". Two different failures need two different greys, otherwise a slow
+/// refresh looks exactly like a broken one.
+pub fn faded_bar(light: bool) -> Rgba {
+    if light {
+        Rgba::hex(0xB2BAC6)
+    } else {
+        Rgba::hex(0x5C6472)
+    }
+}
+
+/// How much the numbers on screen can still be trusted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Freshness {
+    /// fetched on schedule, nothing to apologise for
+    Fresh,
+    /// no error, but the sample is older than `STALE_AFTER`
+    Stale,
+    /// the latest attempt failed; `err` says why
+    Failing,
+}
+
 /// The two bars answer different questions. The 5h bar's colour is its
 /// **severity** (green / amber / red); the 7d bar's colour is its **identity**
 /// (cyan), so the two rows are told apart by colour instead of by weight and
-/// the bar never looks like it changed meaning. Grey wins over both when the
-/// data is stale.
-fn bar_fill(t: &Theme, row: &RowView, dim: bool) -> Rgba {
-    if dim {
-        neutral_bar(t.light)
-    } else if row.limit_secs >= 86_400 {
-        t.day
-    } else {
-        severity(row.remaining)
+/// the bar never looks like it changed meaning. Old data gives up its colour
+/// (faded grey), failed data gives up more (neutral grey).
+fn bar_fill(t: &Theme, row: &RowView, state: Freshness) -> Rgba {
+    match state {
+        Freshness::Failing => neutral_bar(t.light),
+        Freshness::Stale => faded_bar(t.light),
+        Freshness::Fresh if row.limit_secs >= 86_400 => t.day,
+        Freshness::Fresh => severity(row.remaining),
     }
 }
 
@@ -226,7 +247,7 @@ pub struct View {
 /// active cycle (180 s) with room for a retry, and short enough that a genuinely
 /// dead poller is obvious. The countdown bar is exempt — it is derived from the
 /// deadline, which does not rot with the data's age (see `paint_popover`).
-const STALE_AFTER: i64 = 900;
+pub const STALE_AFTER: i64 = 900;
 
 impl View {
     pub fn stale(&self) -> bool {
@@ -234,6 +255,17 @@ impl View {
     }
     pub fn failing(&self) -> bool {
         self.err.is_some() && self.err_at >= self.at
+    }
+    /// One value for the whole card: both painters read it, so the panel and the
+    /// mini can never disagree about how trustworthy the same number is.
+    pub fn freshness(&self) -> Freshness {
+        if self.failing() {
+            Freshness::Failing
+        } else if self.stale() {
+            Freshness::Stale
+        } else {
+            Freshness::Fresh
+        }
     }
 }
 
@@ -474,6 +506,13 @@ pub struct Hits {
 }
 
 /// The header's right-hand text, which doubles as the refresh button's label.
+///
+/// One verb, two states:「2 分钟前更新」when the sample is current and
+/// 「20 分钟未更新」once it is not. The old pair flipped the word order
+/// (「更新 2 分钟前」/「25 分钟前更新」), which read as two different facts when
+/// they were only one — and left the stale case looking like a typo. Swapping
+/// 更新/未更新 says the same thing in the same shape, and tells the user *why*
+/// the bars lost their colour.
 pub fn status_line(v: &View) -> String {
     if v.failing() {
         "更新失败".to_string()
@@ -481,10 +520,11 @@ pub fn status_line(v: &View) -> String {
         "刷新中…".to_string()
     } else if v.at == 0 {
         "读取中…".to_string()
-    } else if v.stale() {
-        format!("{}更新", fmt::ago(v.at, v.now))
+    } else if v.freshness() == Freshness::Stale {
+        // `ago` already says how long: "20 分钟前" -> "20 分钟未更新"
+        format!("{}未更新", fmt::ago(v.at, v.now).trim_end_matches('前'))
     } else {
-        format!("更新 {}", fmt::ago(v.at, v.now))
+        format!("{}更新", fmt::ago(v.at, v.now))
     }
 }
 
@@ -634,6 +674,7 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
 
     let pad = s(PAD);
     let failing = v.failing();
+    let fresh = v.freshness();
     let hits = header_hits(v, scale, f);
 
     // header: title + switch on the left, refresh on the right ------------
@@ -751,12 +792,18 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             s(130.0) as i32,
             s(26.0) as i32,
             Align::Right,
-            if failing || v.stale() {
-                t.muted
-            } else if !v.show_used && row.remaining < 40.0 {
-                severity(row.remaining)
-            } else {
-                t.text
+            // Stale numbers stay readable: they are still the best estimate we
+            // have, and greying them made the card look switched off. Only a
+            // failed fetch mutes them, because then we cannot vouch for them at
+            // all. Either way the severity tint is withdrawn — the colour was
+            // claiming a bucket the old sample may no longer be in.
+            match fresh {
+                Freshness::Failing => t.muted,
+                Freshness::Stale => t.text,
+                Freshness::Fresh if !v.show_used && row.remaining < 40.0 => {
+                    severity(row.remaining)
+                }
+                Freshness::Fresh => t.text,
             },
         );
 
@@ -769,7 +816,7 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             s(BAR_H),
             frac as f32,
             t.track,
-            bar_fill(t, row, failing || v.stale()),
+            bar_fill(t, row, fresh),
         );
 
         // the time bar: full right after a reset, empty at the deadline.
@@ -917,15 +964,11 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
     );
 
     let failing = v.failing();
+    let fresh = v.freshness();
     let rows = &v.rows;
     for i in 0..2.min(rows.len()) {
         let row = &rows[i];
         let y = if i == 0 { s(11.0) } else { s(30.0) };
-        let sev = if failing || v.stale() {
-            neutral_bar(t.light)
-        } else {
-            severity(row.remaining)
-        };
         card.text(
             &f.mini_label,
             &row.short,
@@ -954,7 +997,7 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             s(bar_h),
             frac as f32,
             t.track,
-            bar_fill(t, row, failing || v.stale()),
+            bar_fill(t, row, fresh),
         );
         // and the countdown bar underneath, one dp thinner than in the panel
         // because this card only has 50 dp to give. Amber even when the quota
@@ -983,12 +1026,13 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             s(35.0) as i32,
             s(12.0) as i32,
             Align::Right,
-            if failing || v.stale() {
-                t.muted
-            } else if !v.show_used && row.remaining < 40.0 {
-                sev
-            } else {
-                t.text
+            match fresh {
+                Freshness::Failing => t.muted,
+                Freshness::Stale => t.text,
+                Freshness::Fresh if !v.show_used && row.remaining < 40.0 => {
+                    severity(row.remaining)
+                }
+                Freshness::Fresh => t.text,
             },
         );
     }
@@ -1042,16 +1086,36 @@ mod tests {
     }
 
     /// The weekly bar is an identity colour: it must not drift into the 5h
-    /// severity palette, and both bars go grey together when the data is stale.
+    /// severity palette, and old data drops out of both palettes.
     #[test]
     fn weekly_bar_keeps_its_own_colour() {
         let t = theme(true);
-        assert_eq!(bar_fill(&t, &row(18_000, 90.0), false), severity(90.0));
-        assert_eq!(bar_fill(&t, &row(604_800, 90.0), false), t.day);
-        assert_eq!(bar_fill(&t, &row(604_800, 10.0), false), t.day);
-        assert_eq!(bar_fill(&t, &row(18_000, 10.0), false), severity(10.0));
-        assert_eq!(bar_fill(&t, &row(604_800, 90.0), true), neutral_bar(true));
-        assert_eq!(&bar_fill(&theme(false), &row(604_800, 90.0), false), &theme(false).day);
+        let fresh = Freshness::Fresh;
+        assert_eq!(bar_fill(&t, &row(18_000, 90.0), fresh), severity(90.0));
+        assert_eq!(bar_fill(&t, &row(604_800, 90.0), fresh), t.day);
+        assert_eq!(bar_fill(&t, &row(604_800, 10.0), fresh), t.day);
+        assert_eq!(bar_fill(&t, &row(18_000, 10.0), fresh), severity(10.0));
+        assert_eq!(&bar_fill(&theme(false), &row(604_800, 90.0), fresh), &theme(false).day);
+    }
+
+    /// Three states, three fills — and the two greys must be far enough apart
+    /// that "old" cannot be mistaken for "broken" at a glance.
+    #[test]
+    fn freshness_gets_a_colour_of_its_own() {
+        let t = theme(true);
+        let w = row(604_800, 90.0);
+        let stale = bar_fill(&t, &w, Freshness::Stale);
+        let failing = bar_fill(&t, &w, Freshness::Failing);
+        assert_eq!(stale, faded_bar(true));
+        assert_eq!(failing, neutral_bar(true));
+        assert_ne!(stale, failing);
+        // faded is closer to the card than the failure grey: lighter in light
+        // mode, darker in dark mode
+        assert!(stale.r > failing.r, "light mode: faded must be lighter");
+        // in dark mode "less prominent" means darker, so the comparison flips
+        let d = theme(false);
+        assert!(faded_bar(false).r < neutral_bar(false).r, "dark mode: faded must sit closer to the track");
+        assert_ne!(bar_fill(&d, &w, Freshness::Fresh), stale);
     }
 
     /// 15 minutes is the line: longer than one active cycle (180 s) with room

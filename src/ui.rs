@@ -481,10 +481,9 @@ pub fn status_line(v: &View) -> String {
         "刷新中…".to_string()
     } else if v.at == 0 {
         "读取中…".to_string()
-    } else if v.stale() {
-        format!("{}更新", fmt::ago(v.at, v.now))
     } else {
-        format!("更新 {}", fmt::ago(v.at, v.now))
+        // one shape for both states: 刚刚更新 / 2 分钟前更新 / 25 分钟前更新
+        format!("{}更新", fmt::ago(v.at, v.now))
     }
 }
 
@@ -751,9 +750,8 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             s(130.0) as i32,
             s(26.0) as i32,
             Align::Right,
-            if failing || v.stale() {
-                t.muted
-            } else if !v.show_used && row.remaining < 40.0 {
+            // only the bar greys out; the number keeps its own colour
+            if !v.show_used && row.remaining < 40.0 {
                 severity(row.remaining)
             } else {
                 t.text
@@ -921,11 +919,7 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
     for i in 0..2.min(rows.len()) {
         let row = &rows[i];
         let y = if i == 0 { s(11.0) } else { s(30.0) };
-        let sev = if failing || v.stale() {
-            neutral_bar(t.light)
-        } else {
-            severity(row.remaining)
-        };
+        let sev = severity(row.remaining);
         card.text(
             &f.mini_label,
             &row.short,
@@ -983,9 +977,7 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             s(35.0) as i32,
             s(12.0) as i32,
             Align::Right,
-            if failing || v.stale() {
-                t.muted
-            } else if !v.show_used && row.remaining < 40.0 {
+            if !v.show_used && row.remaining < 40.0 {
                 sev
             } else {
                 t.text

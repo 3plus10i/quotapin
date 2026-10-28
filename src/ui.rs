@@ -209,6 +209,12 @@ pub struct View {
     pub nearest_expiry: Option<i64>,
     /// unix ts of last successful fetch
     pub at: i64,
+    /// unix ts after which this data counts as untrustworthy: the moment the
+    /// next fetch was due plus slack, **not** a fixed age. In idle mode the
+    /// number is *supposed* to be up to 30 min old, so a 10-minute wall-clock
+    /// deadline made the bars grey for two thirds of every idle stretch.
+    /// 0 = no deadline known (nothing fetched yet, or a demo view).
+    pub stale_at: i64,
     /// last error, if the latest attempt failed
     pub err: Option<String>,
     pub err_at: i64,
@@ -222,7 +228,7 @@ pub struct View {
 
 impl View {
     pub fn stale(&self) -> bool {
-        self.at > 0 && self.now - self.at > 600
+        self.stale_at > 0 && self.now > self.stale_at
     }
     pub fn failing(&self) -> bool {
         self.err.is_some() && self.err_at >= self.at
@@ -1046,6 +1052,34 @@ mod tests {
         assert_eq!(bar_fill(&t, &row(18_000, 10.0), false), severity(10.0));
         assert_eq!(bar_fill(&t, &row(604_800, 90.0), true), neutral_bar(true));
         assert_eq!(&bar_fill(&theme(false), &row(604_800, 90.0), false), &theme(false).day);
+    }
+
+    /// Grey means "this app broke its own promise", not "the number is old".
+    /// The deadline comes from the poller's cadence: in idle mode a 25-minute-old
+    /// sample is business as usual and must keep its colours.
+    #[test]
+    fn grey_follows_the_cadence_not_the_wall_clock() {
+        let at = 100_000;
+        let mut v = View {
+            at,
+            now: at + 1_500,
+            ..Default::default()
+        };
+
+        v.stale_at = at + 1_800 + 120; // idle: next fetch 30 min out
+        assert!(!v.stale(), "idle data inside its own cadence is not stale");
+
+        v.now = at + 1_800 + 121;
+        assert!(v.stale(), "a missed cycle has to turn the bars grey");
+
+        v.stale_at = at + 180 + 120; // active cadence
+        v.now = at + 300;
+        assert!(!v.stale());
+        v.now = at + 301;
+        assert!(v.stale(), "three minutes of silence with Codex open is stale");
+
+        // nothing fetched yet: the panel says 读取中… instead of greying rows
+        assert!(!View::default().stale());
     }
 
     /// The decision table from DEVDOC §6.7, exercised on one sample at a time.

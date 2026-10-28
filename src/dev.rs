@@ -34,7 +34,6 @@ fn demo_view(now: i64, used5: f64, used7: f64, err: Option<String>) -> View {
         credits: 3,
         nearest_expiry: Some(now + 3 * 86_400 - 1_200),
         at: now - 42,
-        stale_at: now + 1_800 + 120,
         err: err.clone(),
         err_at: now,
         show_used: false,

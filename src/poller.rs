@@ -19,11 +19,6 @@ pub const WM_FOREGROUND: u32 = sys::WM_APP + 3;
 const INTERVAL_ACTIVE: i64 = 180; // Codex running on this machine
 const INTERVAL_IDLE: i64 = 1800; // Codex not running
 const RETRY_AFTER_ERROR: i64 = 60;
-/// How far past its own scheduled fetch the data may be before the UI calls it
-/// untrustworthy. Covers a slow request plus the 15 s clock the countdowns run
-/// on; it is deliberately **relative to the cadence** — a 30-minute idle
-/// interval makes 25-minute-old data normal, not stale.
-const STALE_SLACK: i64 = 120;
 
 pub struct Toast {
     pub title: String,
@@ -75,7 +70,6 @@ fn build_view(snap: &Snapshot, cfg: &Config, last_ok: Option<&Snapshot>, now: i6
         credits: snap.credits_available,
         nearest_expiry: snap.nearest_credit_expiry(),
         at: if snap.ok { snap.at } else { last_ok.map(|s| s.at).unwrap_or(0) },
-        stale_at: 0, // the loop stamps this once it knows which cadence applies
         err: snap.error.clone(),
         err_at: snap.at,
         show_used: cfg.show_used,
@@ -454,27 +448,9 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
                 failures += 1;
             }
 
-            // One interval, two consumers: when the next fetch is due, and how
-            // long the current numbers stay trustworthy. Deciding them in two
-            // places is how the bars ended up grey every idle afternoon.
-            let interval = if snap.ok {
-                if active {
-                    INTERVAL_ACTIVE
-                } else {
-                    INTERVAL_IDLE
-                }
-            } else if failures <= 3 {
-                RETRY_AFTER_ERROR
-            } else if active {
-                INTERVAL_ACTIVE
-            } else {
-                INTERVAL_IDLE
-            };
-
             {
                 let c = cfg.lock().unwrap();
-                let mut view = build_view(&snap, &c, last_ok.as_ref(), now);
-                view.stale_at = now + interval + STALE_SLACK;
+                let view = build_view(&snap, &c, last_ok.as_ref(), now);
                 if let Ok(mut s) = shared.lock() {
                     s.view = view;
                     s.toasts.extend(toasts);
@@ -485,7 +461,20 @@ fn worker(hwnd: HWND, shared: SharedRef, cfg: Arc<Mutex<Config>>) {
                 PostMessageW(hwnd, WM_DATA, 0, 0);
             }
 
-            next_fetch_at = now + interval;
+            next_fetch_at = now
+                + if snap.ok {
+                    if active {
+                        INTERVAL_ACTIVE
+                    } else {
+                        INTERVAL_IDLE
+                    }
+                } else if failures <= 3 {
+                    RETRY_AFTER_ERROR
+                } else if active {
+                    INTERVAL_ACTIVE
+                } else {
+                    INTERVAL_IDLE
+                };
         }
 
         // --- keep "now" fresh so countdowns stay correct ---------------

@@ -220,9 +220,17 @@ pub struct View {
     pub now: i64,
 }
 
+/// How old the numbers may get before the quota bar stops claiming a severity.
+///
+/// A fixed age, not a share of the poll cadence: 15 min is longer than one
+/// active cycle (180 s) with room for a retry, and short enough that a genuinely
+/// dead poller is obvious. The countdown bar is exempt — it is derived from the
+/// deadline, which does not rot with the data's age (see `paint_popover`).
+const STALE_AFTER: i64 = 900;
+
 impl View {
     pub fn stale(&self) -> bool {
-        self.at > 0 && self.now - self.at > 600
+        self.at > 0 && self.now - self.at > STALE_AFTER
     }
     pub fn failing(&self) -> bool {
         self.err.is_some() && self.err_at >= self.at
@@ -764,7 +772,12 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
             bar_fill(t, row, failing || v.stale()),
         );
 
-        // the time bar: full right after a reset, empty at the deadline
+        // the time bar: full right after a reset, empty at the deadline.
+        //
+        // It keeps its colour when the quota bar greys out. The two bars age
+        // differently: a stale percentage might be wrong, but the deadline came
+        // from the same sample and is still the best estimate there is — so
+        // greying it would throw away the one number still worth reading.
         if v.show_time {
             card.bar(
                 pad,
@@ -773,11 +786,7 @@ pub fn paint_popover(c: &mut Canvas, v: &View, t: &Theme, hover: Hover, scale: f
                 s(TIME_BAR_H),
                 time_frac(row, v),
                 t.track,
-                if failing || v.stale() {
-                    neutral_bar(t.light)
-                } else {
-                    TIME_FILL
-                },
+                TIME_FILL,
             );
         }
 
@@ -948,7 +957,8 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
             bar_fill(t, row, failing || v.stale()),
         );
         // and the countdown bar underneath, one dp thinner than in the panel
-        // because this card only has 50 dp to give
+        // because this card only has 50 dp to give. Amber even when the quota
+        // bar above it has gone grey, for the reason spelled out in paint_popover.
         if v.show_time {
             card.bar(
                 s(34.0),
@@ -957,11 +967,7 @@ pub fn paint_mini(c: &mut Canvas, v: &View, t: &Theme, hover: bool, scale: f32, 
                 s(MINI_TIME_H),
                 time_frac(row, v),
                 t.track,
-                if failing || v.stale() {
-                    neutral_bar(t.light)
-                } else {
-                    TIME_FILL
-                },
+                TIME_FILL,
             );
         }
         let txt = if v.show_used {
@@ -1046,6 +1052,21 @@ mod tests {
         assert_eq!(bar_fill(&t, &row(18_000, 10.0), false), severity(10.0));
         assert_eq!(bar_fill(&t, &row(604_800, 90.0), true), neutral_bar(true));
         assert_eq!(&bar_fill(&theme(false), &row(604_800, 90.0), false), &theme(false).day);
+    }
+
+    /// 15 minutes is the line: longer than one active cycle (180 s) with room
+    /// for a retry, short enough that a stuck poller is obvious.
+    #[test]
+    fn grey_kicks_in_at_fifteen_minutes() {
+        let mut v = View {
+            at: 1_000,
+            now: 1_900,
+            ..Default::default()
+        };
+        assert!(!v.stale(), "exactly 15 minutes is still fresh");
+        v.now = 1_901;
+        assert!(v.stale());
+        assert!(!View::default().stale(), "never fetched: 读取中…, not grey");
     }
 
     /// The decision table from DEVDOC §6.7, exercised on one sample at a time.
